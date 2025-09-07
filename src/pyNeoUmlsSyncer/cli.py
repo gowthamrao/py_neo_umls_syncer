@@ -26,7 +26,7 @@ app = typer.Typer(
 )
 console = Console()
 
-@app.command(name="full-import", help="Perform a one-time bulk import to create a new Neo4j database from UMLS.")
+@app.command(name="full-import", help="Generate CSVs and command for a one-time bulk import.")
 def full_import(
     version: str = typer.Option(
         ...,
@@ -36,27 +36,54 @@ def full_import(
     )
 ):
     """
-    Orchestrates the entire initial bulk import process:
-    1. Downloads the latest UMLS release (if not already present).
-    2. Parses the RRF files in parallel.
-    3. Transforms the data into CSVs, tagging with the version.
-    4. Generates the `neo4j-admin` command for the user to run.
+    Generates the CSV files and the neo4j-admin command for a bulk import.
+    This is the first step in populating a new database. After running this,
+    you must manually run the generated command and then run `init-meta`.
     """
     console.print(Panel(f"[bold cyan]Starting Full UMLS Bulk Import Process for Version: {version}[/bold cyan]", border_style="cyan"))
 
     try:
         # Step 1: Download UMLS data
-        meta_dir = download_umls_if_needed()
+        meta_dir = download_umls_if_needed(version)
 
         # Step 2: Orchestrate the import command generation
         loader = Neo4jLoader()
         loader.run_bulk_import(meta_dir, version)
-        loader.update_meta_node_after_bulk(version)
 
     except Exception as e:
         console.print_exception()
         console.print(Panel(f"[bold red]An error occurred during the bulk import process: {e}", title="[bold red]Error[/bold red]"))
         raise typer.Exit(code=1)
+
+
+@app.command(name="init-meta", help="Initialize metadata after a successful bulk import.")
+def init_meta(
+    version: str = typer.Option(
+        ...,
+        "--version",
+        "-v",
+        help="The version of the UMLS release that was just imported (e.g., '2025AA')."
+    )
+):
+    """
+    Connects to a database that has been populated via bulk import and:
+    1. Creates necessary constraints for Concepts and Codes.
+    2. Creates the :UMLS_Meta node to lock in the current version.
+    """
+    console.print(Panel(f"[bold cyan]Initializing metadata for version: {version}[/bold cyan]", border_style="cyan"))
+    loader = Neo4jLoader()
+    try:
+        loader.update_meta_node_after_bulk(version)
+        console.print(Panel(
+            f"[bold green]Successfully initialized metadata for version {version}. The database is now ready for incremental syncs.[/bold green]",
+            title="[bold green]Metadata Initialized[/bold green]"
+        ))
+    except Exception as e:
+        console.print_exception()
+        console.print(Panel(f"[bold red]Failed to initialize metadata: {e}", title="[bold red]Error[/bold red]"))
+        raise typer.Exit(code=1)
+    finally:
+        loader.close()
 
 @app.command(name="incremental-sync", help="Synchronize an existing DB with a new UMLS version.")
 def incremental_sync(
@@ -80,7 +107,7 @@ def incremental_sync(
 
     try:
         # Step 1: Download UMLS data
-        meta_dir = download_umls_if_needed()
+        meta_dir = download_umls_if_needed(version)
 
         # Step 2: Orchestrate the incremental sync
         loader = Neo4jLoader()

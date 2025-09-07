@@ -20,19 +20,26 @@ class UMLSDownloader:
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
 
-    def _get_latest_release_info(self) -> dict:
-        """Fetches metadata for the latest UMLS full release."""
-        console.log("Fetching latest UMLS release information...")
-        params = {"releaseType": "umls-full-release", "current": "true"}
+    def _get_release_info(self, version: str) -> dict:
+        """Fetches metadata for a specific UMLS full release version."""
+        console.log(f"Fetching UMLS release information for version: [bold cyan]{version}[/bold cyan]...")
+        # We don't use 'current=true' so we can find any version
+        params = {"releaseType": "umls-full-release"}
         response = requests.get(self.RELEASE_API_URL, params=params)
         response.raise_for_status()
         data = response.json()
-        if not data["result"]:
-            raise ValueError("No current UMLS full release found.")
 
-        latest_release = data["result"][0]
-        console.log(f"Found latest release: {latest_release['name']}")
-        return latest_release
+        if not data["result"]:
+            raise ValueError("No UMLS full releases found in API response.")
+
+        for release in data["result"]:
+            if release.get("name") == version:
+                console.log(f"Found matching release: {release['name']}")
+                return release
+
+        raise ValueError(f"UMLS release version '{version}' not found via API. "
+                         f"Available versions: {[r.get('name') for r in data['result']]}")
+
 
     def _calculate_md5(self, filepath: Path) -> str:
         """Calculates the MD5 checksum of a file."""
@@ -42,19 +49,18 @@ class UMLSDownloader:
                 hash_md5.update(chunk)
         return hash_md5.hexdigest()
 
-    def download_and_extract_release(self) -> Path:
+    def download_and_extract_release(self, version: str) -> Path:
         """
-        Orchestrates the download, verification, and extraction of the UMLS release.
+        Orchestrates the download, verification, and extraction of a specific UMLS release.
         Returns the path to the extracted META directory.
         Is idempotent: skips download/extraction if already present.
         """
-        release_info = self._get_latest_release_info()
-        release_name = release_info["name"]
+        release_info = self._get_release_info(version)
         download_url = release_info["downloadUrl"]
         expected_checksum = release_info.get("md5")
 
-        # Define paths
-        release_version_dir = self.download_dir / release_name
+        # Define paths using the specific version name
+        release_version_dir = self.download_dir / version
         zip_filename = Path(download_url).name
         zip_filepath = self.download_dir / zip_filename
         extracted_meta_path = release_version_dir / "META"
@@ -113,7 +119,7 @@ class UMLSDownloader:
 
         return extracted_meta_path
 
-def download_umls_if_needed() -> Path:
+def download_umls_if_needed(version: str) -> Path:
     """
     Entry point function to trigger the UMLS download process using app settings.
     """
@@ -121,4 +127,4 @@ def download_umls_if_needed() -> Path:
         api_key=settings.umls_api_key,
         download_dir=settings.download_dir
     )
-    return downloader.download_and_extract_release()
+    return downloader.download_and_extract_release(version)
