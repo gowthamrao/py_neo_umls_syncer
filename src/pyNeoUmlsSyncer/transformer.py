@@ -12,23 +12,23 @@ class CSVTransformer:
     """
     Transforms parsed UMLS data into CSV files suitable for Neo4j's bulk import.
     """
-    def __init__(self, csv_dir: str):
-        self.csv_dir = Path(csv_dir)
-        self.csv_dir.mkdir(parents=True, exist_ok=True)
-        console.log(f"CSV output directory set to: {self.csv_dir.resolve()}")
+    def __init__(self, import_dir: Path):
+        self.import_dir = import_dir
+        self.import_dir.mkdir(parents=True, exist_ok=True)
+        console.log(f"CSV output directory set to: {self.import_dir.resolve()}")
 
     def _write_csv(self, filename: str, header: List[str], rows: List[List[str]]):
         """Utility to write data to a CSV file."""
-        filepath = self.csv_dir / filename
+        filepath = self.import_dir / filename
         with open(filepath, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(header)
             writer.writerows(rows)
         console.log(f"Wrote {len(rows)} rows to {filepath.name}")
 
-    def _write_concept_nodes_csv(self, concepts: Dict[str, Concept], sty_map: Dict[str, List[SemanticType]]):
+    def _write_concept_nodes_csv(self, concepts: Dict[str, Concept], sty_map: Dict[str, List[SemanticType]], version: str):
         """Generates the CSV for Concept nodes."""
-        header = ["cui:ID(Concept-ID)", "preferred_name:string", ":LABEL"]
+        header = ["cui:ID(Concept-ID)", "preferred_name:string", "last_seen_version:string", ":LABEL"]
         rows = []
         for cui, concept in concepts.items():
             semantic_types = sty_map.get(cui, [])
@@ -38,30 +38,34 @@ class CSVTransformer:
             rows.append([
                 concept.cui,
                 concept.preferred_name,
+                version,
                 ";".join(all_labels)
             ])
         self._write_csv("nodes_concepts.csv", header, rows)
 
-    def _write_code_nodes_csv(self, codes: List[Code]):
+    def _write_code_nodes_csv(self, codes: List[Code], version: str):
         """Generates the CSV for Code nodes."""
-        header = ["code_id:ID(Code-ID)", "sab:string", "name:string"]
+        header = ["code_id:ID(Code-ID)", "sab:string", "name:string", "last_seen_version:string"]
         # Use a set to handle duplicate codes that might arise from different term types
         unique_codes = { (c.code_id, c.sab, c.name) for c in codes }
-        rows = [[code_id, sab, name] for code_id, sab, name in unique_codes]
+        rows = [[code_id, sab, name, version] for code_id, sab, name in unique_codes]
         self._write_csv("nodes_codes.csv", header, rows)
 
-    def _write_has_code_rels_csv(self, rels: List[ConceptToCodeRelationship]):
+    def _write_has_code_rels_csv(self, rels: List[ConceptToCodeRelationship], version: str):
         """Generates the CSV for (:Concept)-[:HAS_CODE]->(:Code) relationships."""
-        header = [":START_ID(Concept-ID)", ":END_ID(Code-ID)", ":TYPE"]
+        header = [":START_ID(Concept-ID)", ":END_ID(Code-ID)", "last_seen_version:string", ":TYPE"]
         unique_rels = { (r.cui, r.code_id) for r in rels }
-        rows = [[cui, code_id, "HAS_CODE"] for cui, code_id in unique_rels]
+        rows = [[cui, code_id, version, "HAS_CODE"] for cui, code_id in unique_rels]
         self._write_csv("rels_has_code.csv", header, rows)
 
-    def _write_inter_concept_rels_csv(self, rels: List[InterConceptRelationship]):
+    def _write_inter_concept_rels_csv(self, rels: List[InterConceptRelationship], version: str):
         """
         Generates the CSV for inter-concept relationships, aggregating provenance.
         """
-        header = [":START_ID(Concept-ID)", ":END_ID(Concept-ID)", "source_rela:string", "asserted_by_sabs:string[]", ":TYPE"]
+        header = [
+            ":START_ID(Concept-ID)", ":END_ID(Concept-ID)", "source_rela:string",
+            "asserted_by_sabs:string[]", "last_seen_version:string", ":TYPE"
+        ]
 
         # Aggregate relationships to merge provenance
         agg_rels = defaultdict(set)
@@ -82,6 +86,7 @@ class CSVTransformer:
                 target_cui,
                 source_rela,
                 ";".join(sorted(list(sabs))),
+                version,
                 biolink_predicate
             ])
         self._write_csv("rels_inter_concept.csv", header, rows)
@@ -92,14 +97,15 @@ class CSVTransformer:
         codes: List[Code],
         concept_to_code_rels: List[ConceptToCodeRelationship],
         inter_concept_rels: List[InterConceptRelationship],
-        sty_map: Dict[str, List[SemanticType]]
+        sty_map: Dict[str, List[SemanticType]],
+        version: str
     ):
         """
         Orchestrates the transformation of all parsed data into CSV files.
         """
         console.log("Starting transformation of parsed data to CSV files...")
-        self._write_concept_nodes_csv(concepts, sty_map)
-        self._write_code_nodes_csv(codes)
-        self._write_has_code_rels_csv(concept_to_code_rels)
-        self._write_inter_concept_rels_csv(inter_concept_rels)
+        self._write_concept_nodes_csv(concepts, sty_map, version)
+        self._write_code_nodes_csv(codes, version)
+        self._write_has_code_rels_csv(concept_to_code_rels, version)
+        self._write_inter_concept_rels_csv(inter_concept_rels, version)
         console.log("[green]CSV transformation complete.[/green]")

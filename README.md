@@ -36,6 +36,12 @@ The package is configured via environment variables. You can set them in your sh
 # Required: Your UMLS API Key from the UTS website
 PYNEOUMLSSYNCER_UMLS_API_KEY="your-api-key-here"
 
+# Required: The absolute path to your Neo4j instance's import directory.
+# This tool needs to write CSVs here, and Neo4j needs to read them.
+# Example for Docker: "/path/on/host/mapped/to/import"
+# Example for local install: "/var/lib/neo4j/import"
+PYNEOUMLSSYNCER_NEO4J_IMPORT_DIR="/your/neo4j/import/dir"
+
 # --- Optional Overrides ---
 # Neo4j connection details
 PYNEOUMLSSYNCER_NEO4J_URI="neo4j://localhost:7687"
@@ -55,8 +61,11 @@ The primary entry point is the `py-neo-umls-syncer` command-line interface.
 
 The first time you populate your database, you must use the `full-import` command. This will download the latest UMLS release, process it, and generate the necessary command for Neo4j's offline bulk importer.
 
+You must provide the version of the release you are importing. This is critical for enabling future incremental updates.
+
 ```bash
-py-neo-umls-syncer full-import
+# Example for the May 2025 release
+py-neo-umls-syncer full-import --version "2025AA"
 ```
 
 This command will produce output that includes a shell command block like this:
@@ -66,10 +75,10 @@ This command will produce output that includes a shell command block like this:
 # Example: `neo4j stop -d neo4j`
 
 neo4j-admin database import full \
-    --nodes=Concept-ID="/path/to/pyNeoUmlsSyncer/csv_output/nodes_concepts.csv" \
-    --nodes=Code-ID="/path/to/pyNeoUmlsSyncer/csv_output/nodes_codes.csv" \
-    --relationships=HAS_CODE="/path/to/pyNeoUmlsSyncer/csv_output/rels_has_code.csv" \
-    --relationships="/path/to/pyNeoUmlsSyncer/csv_output/rels_inter_concept.csv" \
+    --nodes=Concept:Concept-ID="nodes_concepts.csv" \
+    --nodes=Code:Code-ID="nodes_codes.csv" \
+    --relationships=HAS_CODE="rels_has_code.csv" \
+    --relationships="rels_inter_concept.csv" \
     --overwrite-destination=true \
     neo4j
 ```

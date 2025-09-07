@@ -17,7 +17,7 @@ def test_inter_concept_relationship_provenance_aggregation(test_csv_dir: Path):
     # ARRANGE
     # Instantiate the transformer, pointing it to the test-specific temp directory
     # provided by the pytest fixture.
-    transformer = CSVTransformer(csv_dir=str(test_csv_dir))
+    transformer = CSVTransformer(import_dir=test_csv_dir)
 
     # Mock data representing parsed relationships from MRREL.RRF.
     # We have three distinct conceptual relationships to test:
@@ -34,7 +34,7 @@ def test_inter_concept_relationship_provenance_aggregation(test_csv_dir: Path):
     # ACT
     # Call the private method that contains the aggregation logic.
     # Testing private methods is acceptable for focused unit tests like this.
-    transformer._write_inter_concept_rels_csv(mock_relationships)
+    transformer._write_inter_concept_rels_csv(mock_relationships, version="v_test")
 
     # ASSERT
     # Read the generated CSV file and verify its contents.
@@ -54,6 +54,7 @@ def test_inter_concept_relationship_provenance_aggregation(test_csv_dir: Path):
     # The list of SABs should be sorted alphabetically and joined by a semicolon.
     assert agg_row["asserted_by_sabs:string[]"] == "SAB_A;SAB_C"
     assert agg_row["source_rela:string"] == "treats"
+    assert agg_row["last_seen_version:string"] == "v_test"
     assert agg_row[":TYPE"] == "biolink:treats"  # Mapped from 'treats'
 
     # 2. Check the single-assertion row (C001 -> C003)

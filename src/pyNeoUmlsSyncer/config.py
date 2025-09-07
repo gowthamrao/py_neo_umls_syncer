@@ -54,8 +54,12 @@ class Settings(BaseSettings):
     )
 
     # --- File Paths ---
+    neo4j_import_dir: str = Field(
+        ...,
+        description="Absolute path to the Neo4j import directory. The user running the script must have write permissions to this directory."
+    )
     download_dir: str = Field("./umls_download", description="Directory to store downloaded UMLS files.")
-    csv_dir: str = Field("./csv_output", description="Directory to store generated CSV files for bulk import.")
+    # The csv_dir is now dynamically set based on the neo4j_import_dir, so it's removed from here.
 
 
 # Instantiate a global settings object to be used throughout the application
