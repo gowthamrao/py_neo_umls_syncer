@@ -1,185 +1,240 @@
 """
-parser.py
+Parallelized Parser for UMLS Rich Release Format (RRF) files.
 
-This module is responsible for the high-performance parsing of UMLS RRF files.
-It uses Python's multiprocessing to parallelize the reading and processing of
-these large, pipe-delimited files.
+This module is responsible for parsing the key RRF files (MRCONSO, MRSTY, MRREL)
+efficiently using multiprocessing. It filters and structures the data into
+a format ready for the transformation step.
 """
 import logging
-import csv
+import os
 from pathlib import Path
-from typing import Iterator, Dict, Any, List, Callable
-from multiprocessing import Pool, cpu_count
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Dict, List, Set, Tuple, Iterator, Any, Callable
+from collections import defaultdict
+from pydantic import BaseModel
+from tqdm import tqdm
+from functools import partial
 
-from .config import Settings
+from .config import settings
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# Define column indices for clarity
-# MRCONSO.RRF columns
-MRCONSO_CUI = 0
-MRCONSO_LAT = 1
-MRCONSO_TS = 2
-MRCONSO_LUI = 3
-MRCONSO_STT = 4
-MRCONSO_SUI = 5
-MRCONSO_ISPREF = 6
-MRCONSO_AUI = 7
-MRCONSO_SAUI = 8
-MRCONSO_SCUI = 9
-MRCONSO_SDUI = 10
-MRCONSO_SAB = 11
-MRCONSO_TTY = 12
-MRCONSO_CODE = 13
-MRCONSO_STR = 14
-MRCONSO_SRL = 15
-MRCONSO_SUPPRESS = 16
-MRCONSO_CVF = 17
+# --- Data structures for parsing ---
 
-# MRREL.RRF columns
-MRREL_CUI1 = 0
-MRREL_AUI1 = 1
-MRREL_STYPE1 = 2
-MRREL_REL = 3
-MRREL_CUI2 = 4
-MRREL_AUI2 = 5
-MRREL_STYPE2 = 6
-MRREL_RELA = 7
-MRREL_RUI = 8
-MRREL_SRUI = 9
-MRREL_SAB = 10
-MRREL_SL = 11
-MRREL_RG = 12
-MRREL_DIR = 13
-MRREL_SUPPRESS = 14
-MRREL_CVF = 15
+class UmlsTerm(BaseModel):
+    """A temporary model to hold salient information from an MRCONSO row."""
+    cui: str
+    sab: str
+    tty: str
+    code: str
+    name: str
+    ts: str
+    stt: str
+    ispref: str
 
-# MRSTY.RRF columns
-MRSTY_CUI = 0
-MRSTY_TUI = 1
-MRSTY_STN = 2
-MRSTY_STY = 3
-MRSTY_ATUI = 4
-MRSTY_CVF = 5
+# --- Column indices for RRF files for readability ---
 
+class RRF_COLS:
+    class MRCONSO:
+        CUI = 0
+        LAT = 1
+        TS = 4
+        STT = 5
+        ISPREF = 6
+        SAB = 11
+        TTY = 12
+        CODE = 13
+        STR = 14
+        SUPPRESS = 16
 
-from itertools import islice
+    class MRREL:
+        CUI1 = 0
+        CUI2 = 4
+        RELA = 7
+        SAB = 10
+        SUPPRESS = 14
 
-def _parse_chunk(
-    chunk: List[str],
-    parser_func: Callable[[List[str], Settings], Dict[str, Any]],
-    settings: Settings
-) -> List[Dict[str, Any]]:
-    """Worker function to parse a chunk of lines."""
-    # This function remains the same, it processes a list of lines.
-    results = []
-    for line in chunk:
-        # RRF files have a trailing pipe, so the last element is empty.
-        fields = line.strip().split('|')[:-1]
-        if not fields:
+    class MRSTY:
+        CUI = 0
+        TUI = 1
+
+# --- Top-level worker functions for multiprocessing ---
+
+def _process_mrconso_chunk(
+    lines: List[str], sab_filter: Set[str], suppress_filter: Set[str]
+) -> Dict[str, List[UmlsTerm]]:
+    """Worker function to parse a chunk of MRCONSO.RRF lines."""
+    cui_terms: Dict[str, List[UmlsTerm]] = defaultdict(list)
+
+    for line in lines:
+        fields = line.strip().split('|')
+        if len(fields) <= RRF_COLS.MRCONSO.SUPPRESS: continue
+        if fields[RRF_COLS.MRCONSO.LAT] != 'ENG': continue
+
+        sab = fields[RRF_COLS.MRCONSO.SAB]
+        suppress_flag = fields[RRF_COLS.MRCONSO.SUPPRESS]
+
+        if sab not in sab_filter or suppress_flag in suppress_filter:
             continue
-        parsed = parser_func(fields, settings)
-        if parsed:
-            results.append(parsed)
-    return results
 
+        term = UmlsTerm(
+            cui=fields[RRF_COLS.MRCONSO.CUI],
+            sab=sab,
+            tty=fields[RRF_COLS.MRCONSO.TTY],
+            code=fields[RRF_COLS.MRCONSO.CODE],
+            name=fields[RRF_COLS.MRCONSO.STR],
+            ts=fields[RRF_COLS.MRCONSO.TS],
+            stt=fields[RRF_COLS.MRCONSO.STT],
+            ispref=fields[RRF_COLS.MRCONSO.ISPREF]
+        )
+        cui_terms[term.cui].append(term)
 
-def _parse_mrconso_line(fields: List[str], settings: Settings) -> Dict[str, Any] | None:
-    """Parses a single line from MRCONSO.RRF."""
-    # Apply suppression filter
-    if fields[MRCONSO_SUPPRESS] in settings.suppression_handling:
-        return None
-    # Apply SAB filter if it's defined
-    sab = fields[MRCONSO_SAB]
-    if settings.sab_filter and sab not in settings.sab_filter:
-        return None
+    return cui_terms
 
-    return {
-        "cui": fields[MRCONSO_CUI],
-        "sab": sab,
-        "tty": fields[MRCONSO_TTY],
-        "code": fields[MRCONSO_CODE],
-        "str": fields[MRCONSO_STR],
-        "ispref": fields[MRCONSO_ISPREF],
-        "ts": fields[MRCONSO_TS],
-        "stt": fields[MRCONSO_STT],
-    }
+def _process_mrsty_chunk(lines: List[str]) -> Dict[str, Set[str]]:
+    """Worker function to parse a chunk of MRSTY.RRF lines."""
+    cui_stys: Dict[str, Set[str]] = defaultdict(set)
+    for line in lines:
+        fields = line.strip().split('|')
+        if len(fields) <= RRF_COLS.MRSTY.TUI: continue
+        cui = fields[RRF_COLS.MRSTY.CUI]
+        tui = fields[RRF_COLS.MRSTY.TUI]
+        cui_stys[cui].add(tui)
+    return cui_stys
 
-def _parse_mrrel_line(fields: List[str], settings: Settings) -> Dict[str, Any] | None:
-    """Parses a single line from MRREL.RRF."""
-    if fields[MRREL_SUPPRESS] == 'O': # Often only 'O' is relevant for MRREL
-        return None
-    sab = fields[MRREL_SAB]
-    if settings.sab_filter and sab not in settings.sab_filter:
-        return None
+def _process_mrrel_chunk(
+    lines: List[str], sab_filter: Set[str], suppress_filter: Set[str]
+) -> List[Tuple[str, str, str, str]]:
+    """Worker function to parse a chunk of MRREL.RRF lines."""
+    relationships = []
 
-    return {
-        "cui1": fields[MRREL_CUI1],
-        "cui2": fields[MRREL_CUI2],
-        "rela": fields[MRREL_RELA],
-        "sab": sab,
-    }
+    for line in lines:
+        fields = line.strip().split('|')
+        if len(fields) <= RRF_COLS.MRREL.SUPPRESS: continue
 
-def _parse_mrsty_line(fields: List[str], settings: Settings) -> Dict[str, Any] | None:
-    """Parses a single line from MRSTY.RRF."""
-    return {"cui": fields[MRSTY_CUI], "tui": fields[MRSTY_TUI]}
+        sab = fields[RRF_COLS.MRREL.SAB]
+        suppress_flag = fields[RRF_COLS.MRREL.SUPPRESS]
 
+        if sab not in sab_filter or suppress_flag in suppress_filter:
+            continue
+
+        if fields[2] != 'CUI' or fields[6] != 'CUI': continue
+
+        cui1 = fields[RRF_COLS.MRREL.CUI1]
+        cui2 = fields[RRF_COLS.MRREL.CUI2]
+        rela = fields[RRF_COLS.MRREL.RELA]
+
+        relationships.append((cui1, cui2, rela, sab))
+
+    return relationships
+
+# --- Main Parser Class ---
 
 class UmlsParser:
-    """
-    A parser for UMLS RRF files that uses multiprocessing for efficiency.
-    """
-    def __init__(self, settings: Settings):
-        self.settings = settings
-        self.data_dir = Path(self.settings.data_dir) / self.settings.umls_version
-        self.pool = Pool(processes=self.settings.max_parallel_processes)
+    """Orchestrates the parallel parsing of UMLS RRF files."""
+    def __init__(self, rrf_path: Path):
+        if not rrf_path or not rrf_path.is_dir():
+            raise FileNotFoundError(f"RRF path does not exist or is not a directory: {rrf_path}")
+        self.rrf_path = rrf_path
+        self.max_workers = settings.max_parallel_processes or os.cpu_count()
+        self.chunk_size = 250_000
+        logger.info(f"UmlsParser initialized with {self.max_workers} workers.")
 
-    def _parse_file(
-        self,
-        filename: str,
-        parser_func: Callable[[List[str], Settings], Dict[str, Any]],
-        chunk_size: int = 100000
-    ) -> Iterator[Dict[str, Any]]:
-        """
-        A generator that parses a file in parallel chunks.
-        """
-        filepath = self.data_dir / filename
-        if not filepath.exists():
-            raise FileNotFoundError(f"Required RRF file not found: {filepath}")
+    def _parse_file_parallel(self, file_name: str, worker_func: Callable, result_aggregator: Callable):
+        """Generic parallel file parser."""
+        file_path = self.rrf_path / file_name
+        if not file_path.exists():
+            raise FileNotFoundError(f"Required RRF file not found: {file_path}")
 
-        logger.info(f"Starting parallel parsing of {filename} with {self.settings.max_parallel_processes} processes.")
+        results = []
+        with ProcessPoolExecutor(max_workers=self.max_workers) as executor, open(file_path, 'r', encoding='utf-8') as f:
+            futures = {
+                executor.submit(worker_func, list(chunk))
+                for chunk in self._chunk_iterator(f, self.chunk_size)
+            }
 
-        with open(filepath, 'r', encoding='utf-8') as f:
-            # Create a generator that reads the file in chunks
-            chunk_generator = (
-                list(islice(f, chunk_size)) for _ in iter(lambda: True, False)
-            )
+            progress_bar = tqdm(total=len(futures), desc=f"Parsing {file_name}")
+            for future in as_completed(futures):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    logger.error(f"A worker process failed for {file_name}: {e}", exc_info=True)
+                progress_bar.update(1)
+            progress_bar.close()
 
-            # Process the chunks in parallel using imap_unordered for lazy evaluation
-            for result_chunk in self.pool.starmap(
-                _parse_chunk,
-                ((chunk, parser_func, self.settings) for chunk in chunk_generator if chunk)
-            ):
-                for result in result_chunk:
-                    yield result
+        return result_aggregator(results)
 
-        logger.info(f"Finished parsing {filename}.")
+    def _chunk_iterator(self, iterator: Iterator, chunk_size: int) -> Iterator[List[Any]]:
+        """Yields chunks of a given size from an iterator."""
+        chunk = []
+        for item in iterator:
+            chunk.append(item)
+            if len(chunk) >= chunk_size:
+                yield chunk
+                chunk = []
+        if chunk:
+            yield chunk
 
-    def parse_mrconso(self) -> Iterator[Dict[str, Any]]:
-        """Parses MRCONSO.RRF and yields processed records."""
-        return self._parse_file("MRCONSO.RRF", _parse_mrconso_line)
+    def get_cui_terms(self) -> Dict[str, List[UmlsTerm]]:
+        """Parses MRCONSO.RRF to get all terms for each CUI."""
+        worker = partial(
+            _process_mrconso_chunk,
+            sab_filter=set(settings.sab_filter),
+            suppress_filter=set(settings.suppression_handling)
+        )
+        def aggregate_terms(results: List[Dict[str, List[UmlsTerm]]]) -> Dict[str, List[UmlsTerm]]:
+            logger.info("Aggregating term data from all workers...")
+            aggregated = defaultdict(list)
+            for result_dict in results:
+                for cui, terms in result_dict.items():
+                    aggregated[cui].extend(terms)
+            return aggregated
 
-    def parse_mrrel(self) -> Iterator[Dict[str, Any]]:
-        """Parses MRREL.RRF and yields processed records."""
-        return self._parse_file("MRREL.RRF", _parse_mrrel_line)
+        return self._parse_file_parallel('MRCONSO.RRF', worker, aggregate_terms)
 
-    def parse_mrsty(self) -> Iterator[Dict[str, Any]]:
-        """Parses MRSTY.RRF and yields processed records."""
-        return self._parse_file("MRSTY.RRF", _parse_mrsty_line)
+    def get_cui_semantic_types(self) -> Dict[str, Set[str]]:
+        """Parses MRSTY.RRF to get all semantic types for each CUI."""
+        def aggregate_stys(results: List[Dict[str, Set[str]]]) -> Dict[str, Set[str]]:
+            logger.info("Aggregating semantic type data from all workers...")
+            aggregated = defaultdict(set)
+            for result_dict in results:
+                for cui, stys in result_dict.items():
+                    aggregated[cui].update(stys)
+            return aggregated
 
-    def __del__(self):
-        """Ensure the multiprocessing pool is closed when the object is destroyed."""
-        self.pool.close()
-        self.pool.join()
+        return self._parse_file_parallel('MRSTY.RRF', _process_mrsty_chunk, aggregate_stys)
+
+    def get_cui_relationships(self) -> List[Tuple[str, str, str, str]]:
+        """Parses MRREL.RRF to get all CUI-to-CUI relationships."""
+        worker = partial(
+            _process_mrrel_chunk,
+            sab_filter=set(settings.sab_filter),
+            suppress_filter=set(settings.suppression_handling)
+        )
+        def aggregate_rels(results: List[List[Tuple[str, str, str, str]]]) -> List[Tuple[str, str, str, str]]:
+            logger.info("Aggregating relationship data from all workers...")
+            return [item for sublist in results for item in sublist]
+
+        return self._parse_file_parallel('MRREL.RRF', worker, aggregate_rels)
+
+    @staticmethod
+    def select_preferred_name(terms: List[UmlsTerm]) -> UmlsTerm:
+        """Selects the best term to represent a CUI based on a priority ranking."""
+        sab_priority_map = {sab: i for i, sab in enumerate(settings.sab_priority)}
+        best_term = None
+        best_rank = (float('inf'), float('inf'), float('inf'), float('inf'))
+
+        for term in terms:
+            sab_rank = sab_priority_map.get(term.sab, float('inf'))
+            ts_rank = 0 if term.ts == 'P' else 1
+            stt_rank = 0 if term.stt == 'PF' else (1 if term.stt == 'VO' else 2)
+            ispref_rank = 0 if term.ispref == 'Y' else 1
+            current_rank = (sab_rank, ts_rank, stt_rank, ispref_rank)
+
+            if best_term is None or current_rank < best_rank:
+                best_rank = current_rank
+                best_term = term
+
+        if not best_term: return terms[0]
+        return best_term

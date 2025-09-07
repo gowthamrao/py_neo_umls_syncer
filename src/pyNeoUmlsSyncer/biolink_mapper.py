@@ -1,127 +1,89 @@
 """
-biolink_mapper.py
+Biolink Model Mapping Service.
 
-This module provides the logic for mapping UMLS entities to the Biolink Model.
-It is essential for standardizing the graph schema and ensuring interoperability.
-
-The mappings provided here are representative and not exhaustive. A production
-system would require a more comprehensive and regularly updated mapping source.
+This module provides a service for mapping UMLS identifiers to their
+corresponding Biolink Model concepts. It uses simple, file-based mappings
+to allow for easy updates and configuration without changing the code.
 """
 
-from typing import Dict, List
+import csv
+from pathlib import Path
+from typing import Dict, Optional
+import logging
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 class BiolinkMapper:
     """
-    Handles the mapping of UMLS semantic types (TUIs) and relationship
-    attributes (RELAs) to their corresponding Biolink Model identifiers.
+    Loads and provides access to UMLS-to-Biolink mappings.
     """
-
-    # A mapping from UMLS Semantic Type Unique Identifiers (TUIs) to Biolink Categories.
-    # This is a curated subset. A complete mapping is a significant undertaking.
-    # Source: Combination of manual curation and inspection of existing resources.
-    TUI_TO_BIOLINK_CATEGORY: Dict[str, str] = {
-        "T001": "biolink:Organism",
-        "T005": "biolink:Virus",
-        "T007": "biolink:Bacterium",
-        "T017": "biolink:AnatomicalEntity",
-        "T022": "biolink:GrossAnatomicalStructure",
-        "T023": "biolink:BodyPart",
-        "T024": "biolink:Tissue",
-        "T025": "biolink:Cell",
-        "T026": "biolink:CellComponent",
-        "T028": "biolink:Gene",
-        "T033": "biolink:Finding",
-        "T034": "biolink:LaboratoryOrTestResult",
-        "T037": "biolink:InjuryOrPoisoning",
-        "T046": "biolink:Pathology",
-        "T047": "biolink:Disease",
-        "T048": "biolink:MentalOrBehavioralDysfunction",
-        "T058": "biolink:HealthCareActivity",
-        "T060": "biolink:DiagnosticProcedure",
-        "T061": "biolink:TherapeuticOrPreventiveProcedure",
-        "T062": "biolink:ResearchActivity",
-        "T064": "biolink:MedicalDevice",
-        "T082": "biolink:SpatialConcept",
-        "T101": "biolink:PatientOrPopulation",
-        "T109": "biolink:OrganicChemical",
-        "T114": "biolink:NucleicAcid",
-        "T116": "biolink:AminoAcidSequence",
-        "T121": "biolink:PharmacologicSubstance",
-        "T123": "biolink:BiologicallyActiveSubstance",
-        "T129": "biolink:ImmunologicFactor",
-        "T131": "biolink:HazardousOrPoisonousSubstance",
-        "T167": "biolink:Substance",
-        "T184": "biolink:SignOrSymptom",
-        "T191": "biolink:NeoplasticProcess",
-        "T200": "biolink:ClinicalDrug",
-        "T201": "biolink:ClinicalAttribute",
-    }
-
-    # A mapping from UMLS Relationship Attributes (RELAs) to Biolink Predicates.
-    # This is also a curated subset. It focuses on common, high-value relationships.
-    RELA_TO_BIOLINK_PREDICATE: Dict[str, str] = {
-        "treats": "biolink:treats",
-        "treated_by": "biolink:treated_by",
-        "causes": "biolink:causes",
-        "caused_by": "biolink:caused_by",
-        "diagnoses": "biolink:diagnoses",
-        "diagnosed_by": "biolink:diagnosed_by",
-        "prevents": "biolink:prevents",
-        "prevented_by": "biolink:prevented_by",
-        "disrupts": "biolink:disrupts",
-        "disrupted_by": "biolink:disrupted_by",
-        "co-occurs_with": "biolink:co-occurs_with",
-        "location_of": "biolink:location_of",
-        "has_location": "biolink:has_location",
-        "part_of": "biolink:part_of",
-        "has_part": "biolink:has_part",
-        "isa": "biolink:subclass_of", # 'isa' is a common RELA for hierarchical relationships
-        "has_ingredient": "biolink:has_ingredient",
-        "has_active_ingredient": "biolink:has_active_ingredient",
-        "contraindicated_with": "biolink:contraindicated_with",
-        "may_treat": "biolink:may_treat",
-        "may_prevent": "biolink:may_prevent",
-    }
-
-    DEFAULT_BIOLINK_CATEGORY = "biolink:NamedThing"
-    DEFAULT_BIOLINK_PREDICATE = "biolink:related_to"
-
-    def get_biolink_categories(self, tuis: List[str]) -> List[str]:
+    def __init__(self, resource_dir: Optional[Path] = None):
         """
-        Maps a list of TUIs to a list of Biolink categories.
+        Initializes the mapper by loading mapping files from the resource directory.
 
         Args:
-            tuis: A list of Semantic Type Identifiers (TUI) from MRSTY.RRF.
-
-        Returns:
-            A list of corresponding Biolink category labels. Defaults to
-            'biolink:NamedThing' if no specific mapping is found.
+            resource_dir: The directory containing mapping files. If None, defaults
+                          to the 'resources' subdirectory next to this file.
         """
-        categories = {
-            self.TUI_TO_BIOLINK_CATEGORY.get(tui, self.DEFAULT_BIOLINK_CATEGORY)
-            for tui in tuis
-        }
-        # If the only mapping is the default, just return that.
-        # Otherwise, remove the default if more specific categories were found.
-        if len(categories) > 1 and self.DEFAULT_BIOLINK_CATEGORY in categories:
-            categories.remove(self.DEFAULT_BIOLINK_CATEGORY)
+        if resource_dir is None:
+            resource_dir = Path(__file__).parent / "resources"
 
-        return sorted(list(categories))
+        self.tui_to_category: Dict[str, str] = self._load_mapping(
+            resource_dir / "tui_to_biolink.tsv", "TUI to Category"
+        )
+        self.rela_to_predicate: Dict[str, str] = self._load_mapping(
+            resource_dir / "rela_to_biolink.tsv", "RELA to Predicate"
+        )
+
+        self.default_category = "biolink:NamedThing"
+        self.default_predicate = "biolink:related_to"
+
+    def _load_mapping(self, file_path: Path, mapping_name: str) -> Dict[str, str]:
+        """Loads a two-column TSV mapping file into a dictionary."""
+        mapping: Dict[str, str] = {}
+        if not file_path.exists():
+            logger.warning(
+                f"Mapping file not found for '{mapping_name}': {file_path}. "
+                "The mapping will be empty."
+            )
+            return mapping
+
+        with open(file_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f, delimiter='\t')
+            for i, row in enumerate(reader):
+                if not row or row[0].strip().startswith('#'):
+                    continue
+                if len(row) >= 2:
+                    key = row[0].strip()
+                    value = row[1].strip()
+                    mapping[key] = value
+                else:
+                    logger.warning(
+                        f"Skipping malformed row {i+1} in '{file_path}': {row}"
+                    )
+
+        logger.info(f"Successfully loaded {len(mapping)} entries for '{mapping_name}' from {file_path}")
+        return mapping
+
+    def get_biolink_category(self, tui: str) -> str:
+        """
+        Maps a UMLS TUI (Semantic Type Identifier) to a Biolink Model category.
+
+        If no specific mapping is found, returns a default category.
+        """
+        return self.tui_to_category.get(tui, self.default_category)
 
     def get_biolink_predicate(self, rela: str) -> str:
         """
-        Maps a UMLS RELA to a Biolink predicate.
+        Maps a UMLS RELA (Relationship Attribute) to a Biolink Model predicate.
 
-        Args:
-            rela: The relationship attribute from MRREL.RRF.
-
-        Returns:
-            The corresponding Biolink predicate label. Defaults to
-            'biolink:related_to' if no specific mapping is found.
+        Note: This is a simplified direct mapping. A production system may
+        require more complex logic considering the CUI's types and the REL.
+        If no specific mapping is found, returns a default predicate.
         """
-        if rela is None:
-            return self.DEFAULT_BIOLINK_PREDICATE
-        return self.RELA_TO_BIOLINK_PREDICATE.get(rela.lower(), self.DEFAULT_BIOLINK_PREDICATE)
+        return self.rela_to_predicate.get(rela, self.default_predicate)
 
-# Instantiate a global mapper to be used by other modules
-biolink_mapper = BiolinkMapper()
+# Create a single, importable instance for the application to use.
+# This avoids reloading the mapping files repeatedly.
+mapper = BiolinkMapper()
