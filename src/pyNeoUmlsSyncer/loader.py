@@ -69,15 +69,18 @@ neo4j-admin database import full \\
 
         console.print(Panel.fit(
             Syntax(command, "bash", theme="monokai", line_numbers=True),
-            title="[bold yellow]neo4j-admin Bulk Import Command[/bold yellow]",
+            title="[bold yellow]Step 1: Run the neo4j-admin Bulk Import Command[/bold yellow]",
             border_style="yellow",
             padding=(1, 2)
         ))
 
-        console.print("\n[bold red]IMPORTANT:[/] The target Neo4j database must be stopped before running this command.")
-        console.print(f"Example: `neo4j stop -d {settings.neo4j_database}`")
-        console.print("After starting the database, the metadata node will be created.")
-        console.print("[green]Bulk import command generated successfully.[/green]")
+        console.print("\n[bold red]IMPORTANT:[/] The target Neo4j database must be [bold]stopped[/bold] before running this command.", highlight=False)
+        console.print(f"  Example: `neo4j stop -d {settings.neo4j_database}`")
+        console.print("\n[bold yellow]After the import is complete, restart your database.[/bold yellow]")
+        console.print(f"  Example: `neo4j start -d {settings.neo4j_database}`")
+        console.print("\nThen, run the following command to set up constraints and metadata:")
+        console.print(f"  [bold cyan]py-neo-umls-syncer init-meta --version {version}[/bold cyan]")
+        console.print("\n[green]Bulk import files and command generated successfully.[/green]")
 
     def update_meta_node_after_bulk(self, version: str):
         """
