@@ -10,22 +10,47 @@ def neo4j_container():
     A pytest fixture that starts and stops a Neo4j container for the test session.
     The container is configured with APOC plugins.
     """
-    with Neo4jContainer(
-        image="neo4j:5.18",  # Use a recent version
-        port=7687,
-        http_port=7474,
-        environ={
-            "NEO4J_PLUGINS": '["apoc"]',
-            "NEO4J_apoc_export_file_enabled": "true",
-            "NEO4J_apoc_import_file_enabled": "true",
-            "NEO4J_apoc_import_file_use__neo4j__config": "true",
-            "NEO4J_dbms_security_procedures_unrestricted": "apoc.*"
-        }
-    ) as container:
-        container.driver = container.get_driver()
-        yield container
-        container.driver.close()
+    # Use the fluent API (`.with_...` methods) to avoid constructor conflicts.
+    container = Neo4jContainer(image="neo4j:5.18")
+    container.with_env("NEO4J_PLUGINS", '["apoc"]')
+    container.with_env("NEO4J_apoc_export_file_enabled", "true")
+    container.with_env("NEO4J_apoc_import_file_enabled", "true")
+    container.with_env("NEO4J_apoc_import_file_use__neo4j__config", "true")
+    container.with_env("NEO4J_dbms_security_procedures_unrestricted", "apoc.*")
+    container.with_env("NEO4J_AUTH", "neo4j/password") # Explicitly set for clarity
 
+    with container as c:
+        c.driver = c.get_driver()
+        yield c
+        c.driver.close()
+
+
+@pytest.fixture(scope="session")
+def session_tmp_path(tmpdir_factory):
+    """A session-scoped temporary directory."""
+    return tmpdir_factory.mktemp("data")
+
+@pytest.fixture(scope="session")
+def neo4j_container(session_tmp_path):
+    """
+    A pytest fixture that starts and stops a Neo4j container for the test session.
+    The container is configured with APOC plugins and a mounted import volume.
+    """
+    # Use the fluent API (`.with_...` methods) to avoid constructor conflicts.
+    container = Neo4jContainer(image="neo4j:5.18")
+    container.with_env("NEO4J_PLUGINS", '["apoc"]')
+    container.with_env("NEO4J_apoc_export_file_enabled", "true")
+    container.with_env("NEO4J_apoc_import_file_enabled", "true")
+    container.with_env("NEO4J_apoc_import_file_use__neo4j__config", "true")
+    container.with_env("NEO4J_dbms_security_procedures_unrestricted", "apoc.*")
+    container.with_env("NEO4J_AUTH", "neo4j/password")
+    # Mount the session-scoped temp dir to the container's import directory
+    container.with_volume_mapping(str(session_tmp_path), "/var/lib/neo4j/import")
+
+    with container as c:
+        c.driver = c.get_driver()
+        yield c
+        c.driver.close()
 
 @pytest.fixture
 def neo4j_driver(neo4j_container: Neo4jContainer):
@@ -39,14 +64,12 @@ def neo4j_driver(neo4j_container: Neo4jContainer):
         session.run("MATCH (n) DETACH DELETE n")
     yield driver
 
-
 @pytest.fixture
-def test_csv_dir() -> Path:
+def test_csv_dir(session_tmp_path: Path) -> Path:
     """
-    Creates a temporary directory for test CSV files.
+    Provides the session-scoped temporary directory for CSV files.
+    This directory is mounted into the Neo4j container.
     """
-    test_dir = Path("./test_csv_output")
-    test_dir.mkdir(exist_ok=True)
-    yield test_dir
-    # Teardown: remove the directory after tests are done
-    shutil.rmtree(test_dir)
+    # The directory is already created by the session_tmp_path fixture.
+    # We just return the path. Cleanup is handled by the tmpdir_factory.
+    yield session_tmp_path
