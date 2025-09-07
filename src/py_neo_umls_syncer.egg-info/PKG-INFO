@@ -91,7 +91,7 @@ neo4j-admin database import full \
     --nodes=Concept-ID="/path/to/pyNeoUmlsSyncer/csv_output/nodes_concepts.csv" \
     --nodes=Code-ID="/path/to/pyNeoUmlsSyncer/csv_output/nodes_codes.csv" \
     --relationships=HAS_CODE="/path/to/pyNeoUmlsSyncer/csv_output/rels_has_code.csv" \
-    --relationships=RELATED="/path/to/pyNeoUmlsSyncer/csv_output/rels_inter_concept.csv" \
+    --relationships="/path/to/pyNeoUmlsSyncer/csv_output/rels_inter_concept.csv" \
     --overwrite-destination=true \
     neo4j
 ```
@@ -129,9 +129,8 @@ The generated Labeled Property Graph (LPG) has the following structure:
 
 -   **Relationships**:
     -   `(:Concept)-[:HAS_CODE]->(:Code)`: Connects a concept to its source codes.
-    -   `(:Concept)-[:RELATED]->(:Concept)`: A generic relationship connecting two concepts.
+    -   `(:Concept)-[:biolink:treats]->(:Concept)`: Inter-concept relationships use the mapped Biolink Predicate as the relationship **type**.
         - Properties:
-            - `type`: The mapped Biolink Predicate (e.g., `biolink:treats`).
             - `source_rela`: The original UMLS RELA/REL value.
             - `asserted_by_sabs`: A list of source vocabularies asserting the relationship.
             - `last_seen_version`: The UMLS release this relationship was last seen in.

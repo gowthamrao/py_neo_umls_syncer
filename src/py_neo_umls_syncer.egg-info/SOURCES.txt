@@ -18,3 +18,4 @@ src/py_neo_umls_syncer.egg-info/entry_points.txt
 src/py_neo_umls_syncer.egg-info/requires.txt
 src/py_neo_umls_syncer.egg-info/top_level.txt
 tests/test_delta_strategy.py
+tests/test_parser.py
