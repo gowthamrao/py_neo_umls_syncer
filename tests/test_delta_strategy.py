@@ -129,32 +129,32 @@ def test_apply_additions_and_updates(neo4j_driver: Driver, test_csv_dir: Path):
     # Mock nodes_concepts.csv
     _create_csv_file(
         test_csv_dir / "nodes_concepts.csv",
-        ["cui:ID(Concept-ID)", "preferred_name:string", ":LABEL"],
+        ["cui:ID(Concept-ID)", "preferred_name:string", "last_seen_version:string", ":LABEL"],
         [
-            ["C001", "Aspirin", "Concept;biolink:Drug"],
-            ["C002", "Headache", "Concept;biolink:Disease"],
+            ["C001", "Aspirin", version, "Concept;biolink:Drug"],
+            ["C002", "Headache", version, "Concept;biolink:Disease"],
         ]
     )
 
     # Mock nodes_codes.csv
     _create_csv_file(
         test_csv_dir / "nodes_codes.csv",
-        ["code_id:ID(Code-ID)", "sab:string", "name:string"],
-        [["RXNORM:1191", "RXNORM", "Aspirin"]]
+        ["code_id:ID(Code-ID)", "sab:string", "name:string", "last_seen_version:string"],
+        [["RXNORM:1191", "RXNORM", "Aspirin", version]]
     )
 
     # Mock rels_has_code.csv
     _create_csv_file(
         test_csv_dir / "rels_has_code.csv",
-        [":START_ID(Concept-ID)", ":END_ID(Code-ID)", ":TYPE"],
-        [["C001", "RXNORM:1191", "HAS_CODE"]]
+        [":START_ID(Concept-ID)", ":END_ID(Code-ID)", "last_seen_version:string", ":TYPE"],
+        [["C001", "RXNORM:1191", version, "HAS_CODE"]]
     )
 
     # Mock rels_inter_concept.csv with dynamic relationship types
     _create_csv_file(
         test_csv_dir / "rels_inter_concept.csv",
-        [":START_ID(Concept-ID)", ":END_ID(Concept-ID)", "source_rela:string", "asserted_by_sabs:string[]", ":TYPE"],
-        [["C001", "C002", "treats", "RXNORM;SNOMEDCT_US", "biolink:treats"]]
+        [":START_ID(Concept-ID)", ":END_ID(Concept-ID)", "source_rela:string", "asserted_by_sabs:string[]", "last_seen_version:string", ":TYPE"],
+        [["C001", "C002", "treats", "RXNORM;SNOMEDCT_US", version, "biolink:treats"]]
     )
 
     # 2. EXECUTE: Run the apply_additions_and_updates method.

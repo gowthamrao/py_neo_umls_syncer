@@ -11,10 +11,10 @@ class DeltaStrategy:
     Implements the "Snapshot Diff" incremental update strategy using APOC.
     """
 
-    def __init__(self, driver: Driver, new_version: str, csv_dir: Path):
+    def __init__(self, driver: Driver, new_version: str, import_dir: Path):
         self.driver = driver
         self.new_version = new_version
-        self.csv_dir = csv_dir
+        self.import_dir = import_dir
 
     def _run_query(self, query: str, params: dict = None, db=None):
         """Helper to run a query within a session."""
@@ -104,10 +104,10 @@ class DeltaStrategy:
             // Finally, delete the old, now-isolated concept
             DETACH DELETE old
           ',
-          {batchSize: 5, parallel: false, params: {merges: $merges, version: $version}}
+          {batchSize: $batchSize, parallel: false, params: {merges: $merges, version: $version}}
         )
         """
-        self._run_query(query, params={"merges": merges, "version": self.new_version})
+        self._run_query(query, params={"merges": merges, "version": self.new_version, "batchSize": settings.apoc_batch_size})
         console.log(f"Submitted merge task for {len(merges)} CUI pairs.")
 
     def apply_additions_and_updates(self):
@@ -132,7 +132,7 @@ class DeltaStrategy:
         CALL apoc.create.addLabels(c, apoc.text.split(labels, ';')) YIELD node
         RETURN count(*)
         """
-        self._run_query(concepts_query, params={"url": (self.csv_dir / "nodes_concepts.csv").as_uri(), "version": self.new_version})
+        self._run_query(concepts_query, params={"url": "file:///nodes_concepts.csv", "version": self.new_version})
 
         # 2. Codes
         codes_query = """
@@ -142,7 +142,7 @@ class DeltaStrategy:
         ON MATCH SET c.sab = row['sab:string'], c.name = row['name:string'], c.last_seen_version = $version
         RETURN count(*)
         """
-        self._run_query(codes_query, params={"url": (self.csv_dir / "nodes_codes.csv").as_uri(), "version": self.new_version})
+        self._run_query(codes_query, params={"url": "file:///nodes_codes.csv", "version": self.new_version})
 
         # 3. HAS_CODE Relationships
         has_code_rel_query = """
@@ -154,38 +154,32 @@ class DeltaStrategy:
         ON MATCH SET r.last_seen_version = $version
         RETURN count(*)
         """
-        self._run_query(has_code_rel_query, params={"url": (self.csv_dir / "rels_has_code.csv").as_uri(), "version": self.new_version})
+        self._run_query(has_code_rel_query, params={"url": "file:///rels_has_code.csv", "version": self.new_version})
 
         # 4. Inter-Concept Relationships
         # This query correctly uses apoc.merge.relationship to create relationships
         # with dynamic types idempotently, fulfilling the FRD requirements.
+        # The redundant apoc.periodic.iterate wrapper has been removed for efficiency.
         inter_concept_rel_query = """
-        CALL apoc.periodic.iterate(
-        'CALL apoc.load.csv($url, {header:true}) YIELD map AS row RETURN row',
-        '
-            MATCH (start:Concept {cui: row[":START_ID(Concept-ID)"]})
-            MATCH (end:Concept {cui: row[":END_ID(Concept-ID)"]})
-
-            // Use apoc.merge.relationship to create a dynamic relationship type
-            // The relationship is uniquely identified by its source_rela property.
-            CALL apoc.merge.relationship(
-                start,
-                row[":TYPE"],
-                { source_rela: row["source_rela:string"] }, // Identity properties
-                { // Properties to set on create or match
-                    last_seen_version: $version,
-                    asserted_by_sabs: apoc.text.split(row["asserted_by_sabs:string[]"], ";")
-                },
-                end
-            ) YIELD rel
-            RETURN count(*)
-        ', {batchSize: $batchSize, parallel: false, params: {url: $url, version: $version, batchSize: $apocBatchSize}})
+        CALL apoc.load.csv($url, {header:true}) YIELD map AS row
+        WITH row
+        MATCH (start:Concept {cui: row[":START_ID(Concept-ID)"]})
+        MATCH (end:Concept {cui: row[":END_ID(Concept-ID)"]})
+        CALL apoc.merge.relationship(
+            start,
+            row[":TYPE"],
+            { source_rela: row["source_rela:string"] },
+            {
+                last_seen_version: $version,
+                asserted_by_sabs: apoc.text.split(row["asserted_by_sabs:string[]"], ";")
+            },
+            end
+        ) YIELD rel
+        RETURN count(rel)
         """
         self._run_query(inter_concept_rel_query, params={
-            "url": (self.csv_dir / "rels_inter_concept.csv").as_uri(),
-            "version": self.new_version,
-            "apocBatchSize": settings.apoc_batch_size,
-            "batchSize": 1000  # Outer batch size for iterate
+            "url": "file:///rels_inter_concept.csv",
+            "version": self.new_version
         })
 
         console.log("[green]Finished applying additions and updates.[/green]")

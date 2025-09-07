@@ -27,15 +27,22 @@ app = typer.Typer(
 console = Console()
 
 @app.command(name="full-import", help="Perform a one-time bulk import to create a new Neo4j database from UMLS.")
-def full_import():
+def full_import(
+    version: str = typer.Option(
+        ...,
+        "--version",
+        "-v",
+        help="The version of the UMLS release being imported (e.g., '2025AA'). This is mandatory for future incremental updates."
+    )
+):
     """
     Orchestrates the entire initial bulk import process:
     1. Downloads the latest UMLS release (if not already present).
     2. Parses the RRF files in parallel.
-    3. Transforms the data into CSVs.
+    3. Transforms the data into CSVs, tagging with the version.
     4. Generates the `neo4j-admin` command for the user to run.
     """
-    console.print(Panel("[bold cyan]Starting Full UMLS Bulk Import Process[/bold cyan]", border_style="cyan"))
+    console.print(Panel(f"[bold cyan]Starting Full UMLS Bulk Import Process for Version: {version}[/bold cyan]", border_style="cyan"))
 
     try:
         # Step 1: Download UMLS data
@@ -43,7 +50,8 @@ def full_import():
 
         # Step 2: Orchestrate the import command generation
         loader = Neo4jLoader()
-        loader.run_bulk_import(meta_dir)
+        loader.run_bulk_import(meta_dir, version)
+        loader.update_meta_node_after_bulk(version)
 
     except Exception as e:
         console.print_exception()

@@ -36,31 +36,33 @@ class Neo4jLoader:
             self._driver.close()
             console.log("Neo4j driver connection closed.")
 
-    def run_bulk_import(self, meta_dir: Path):
+    def run_bulk_import(self, meta_dir: Path, version: str):
         """
         Parses and transforms UMLS data into CSVs and generates the
         neo4j-admin import command for the user to execute.
         """
         console.log("Starting bulk import process...")
+        import_dir = Path(settings.neo4j_import_dir)
 
         # Step 1: Parse RRF files
         parser = RRFParser(meta_dir)
         concepts, codes, concept_to_code_rels, inter_concept_rels, sty_map = parser.parse_files()
 
-        # Step 2: Transform parsed data into CSVs
-        transformer = CSVTransformer(settings.csv_dir)
+        # Step 2: Transform parsed data into CSVs in the Neo4j import directory
+        transformer = CSVTransformer(import_dir)
         transformer.transform_to_csvs(
-            concepts, codes, concept_to_code_rels, inter_concept_rels, sty_map
+            concepts, codes, concept_to_code_rels, inter_concept_rels, sty_map, version
         )
 
         # Step 3: Generate the neo4j-admin command
-        csv_path = Path(settings.csv_dir).resolve()
+        # The command uses relative paths (just filenames) because neo4j-admin
+        # automatically looks inside the configured import directory.
         command = f"""
 neo4j-admin database import full \\
-    --nodes=Concept-ID="{csv_path / 'nodes_concepts.csv'}" \\
-    --nodes=Code-ID="{csv_path / 'nodes_codes.csv'}" \\
-    --relationships=HAS_CODE="{csv_path / 'rels_has_code.csv'}" \\
-    --relationships="{csv_path / 'rels_inter_concept.csv'}" \\
+    --nodes=Concept:Concept-ID="nodes_concepts.csv" \\
+    --nodes=Code:Code-ID="nodes_codes.csv" \\
+    --relationships=HAS_CODE="rels_has_code.csv" \\
+    --relationships="rels_inter_concept.csv" \\
     --overwrite-destination=true \\
     {settings.neo4j_database}
         """
@@ -74,7 +76,22 @@ neo4j-admin database import full \\
 
         console.print("\n[bold red]IMPORTANT:[/] The target Neo4j database must be stopped before running this command.")
         console.print(f"Example: `neo4j stop -d {settings.neo4j_database}`")
+        console.print("After starting the database, the metadata node will be created.")
         console.print("[green]Bulk import command generated successfully.[/green]")
+
+    def update_meta_node_after_bulk(self, version: str):
+        """
+        Connects to the database and creates the UMLS_Meta node.
+        This is intended to be called after a bulk import is complete and the DB is running.
+        """
+        console.log("Attempting to connect to the database to set the metadata version...")
+        driver = self._get_driver()
+        try:
+            strategy = DeltaStrategy(driver, version, Path(settings.neo4j_import_dir))
+            strategy.ensure_constraints()
+            strategy.update_meta_node()
+        finally:
+            self.close()
 
     def run_incremental_sync(self, meta_dir: Path, version: str):
         """
@@ -82,18 +99,19 @@ neo4j-admin database import full \\
         """
         console.log(f"Starting incremental sync for version: [bold cyan]{version}[/bold cyan]")
         driver = self._get_driver()
+        import_dir = Path(settings.neo4j_import_dir)
 
         # It's more efficient to regenerate CSVs for the new version than to hold it all in memory.
         console.log("Generating new snapshot from RRF files...")
         parser = RRFParser(meta_dir)
         concepts, codes, concept_to_code_rels, inter_concept_rels, sty_map = parser.parse_files()
-        transformer = CSVTransformer(settings.csv_dir)
+        transformer = CSVTransformer(import_dir)
         transformer.transform_to_csvs(
-            concepts, codes, concept_to_code_rels, inter_concept_rels, sty_map
+            concepts, codes, concept_to_code_rels, inter_concept_rels, sty_map, version
         )
         console.log("[green]New snapshot generated successfully.[/green]")
 
-        strategy = DeltaStrategy(driver, new_version, Path(settings.csv_dir))
+        strategy = DeltaStrategy(driver, version, import_dir)
 
         try:
             # 1. Ensure constraints are in place

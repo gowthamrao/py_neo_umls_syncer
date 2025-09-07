@@ -5,12 +5,23 @@ from pathlib import Path
 import shutil
 
 @pytest.fixture(scope="session")
-def session_tmp_path(tmpdir_factory):
-    """A session-scoped temporary directory."""
-    return tmpdir_factory.mktemp("data")
+def test_import_dir() -> Path:
+    """
+    Provides a session-scoped, static temporary directory for CSV files.
+    This directory is mounted into the Neo4j container.
+    """
+    import_dir = Path("/tmp/pyneo_test_import")
+    # Clean up the directory from previous runs
+    if import_dir.exists():
+        shutil.rmtree(import_dir)
+    import_dir.mkdir(parents=True, exist_ok=True)
+    yield import_dir
+    # Final cleanup after the session
+    shutil.rmtree(import_dir)
+
 
 @pytest.fixture(scope="session")
-def neo4j_container(session_tmp_path):
+def neo4j_container(test_import_dir: Path):
     """
     A pytest fixture that starts and stops a Neo4j container for the test session.
     The container is configured with APOC plugins and a mounted import volume.
@@ -23,8 +34,8 @@ def neo4j_container(session_tmp_path):
     container.with_env("NEO4J_apoc_import_file_use__neo4j__config", "true")
     container.with_env("NEO4J_dbms_security_procedures_unrestricted", "apoc.*")
     container.with_env("NEO4J_AUTH", "neo4j/password")
-    # Mount the session-scoped temp dir to the container's import directory
-    container.with_volume_mapping(str(session_tmp_path), "/var/lib/neo4j/import")
+    # Mount the static temp dir to the container's import directory
+    container.with_volume_mapping(str(test_import_dir), "/var/lib/neo4j/import")
 
     with container as c:
         c.driver = c.get_driver()
@@ -44,11 +55,10 @@ def neo4j_driver(neo4j_container: Neo4jContainer):
     yield driver
 
 @pytest.fixture
-def test_csv_dir(session_tmp_path: Path) -> Path:
+def test_csv_dir(test_import_dir: Path) -> Path:
     """
     Provides the session-scoped temporary directory for CSV files.
     This directory is mounted into the Neo4j container.
     """
-    # The directory is already created by the session_tmp_path fixture.
-    # We just return the path. Cleanup is handled by the tmpdir_factory.
-    yield session_tmp_path
+    # This fixture now just returns the static path from the other fixture.
+    yield test_import_dir
