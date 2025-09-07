@@ -5,27 +5,6 @@ from pathlib import Path
 import shutil
 
 @pytest.fixture(scope="session")
-def neo4j_container():
-    """
-    A pytest fixture that starts and stops a Neo4j container for the test session.
-    The container is configured with APOC plugins.
-    """
-    # Use the fluent API (`.with_...` methods) to avoid constructor conflicts.
-    container = Neo4jContainer(image="neo4j:5.18")
-    container.with_env("NEO4J_PLUGINS", '["apoc"]')
-    container.with_env("NEO4J_apoc_export_file_enabled", "true")
-    container.with_env("NEO4J_apoc_import_file_enabled", "true")
-    container.with_env("NEO4J_apoc_import_file_use__neo4j__config", "true")
-    container.with_env("NEO4J_dbms_security_procedures_unrestricted", "apoc.*")
-    container.with_env("NEO4J_AUTH", "neo4j/password") # Explicitly set for clarity
-
-    with container as c:
-        c.driver = c.get_driver()
-        yield c
-        c.driver.close()
-
-
-@pytest.fixture(scope="session")
 def session_tmp_path(tmpdir_factory):
     """A session-scoped temporary directory."""
     return tmpdir_factory.mktemp("data")
