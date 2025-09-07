@@ -56,7 +56,7 @@ def neo4j_container(tmp_path_factory):
     settings.neo4j_import_dir = str(import_dir)
 
     container = Neo4jContainer(
-        image="neo4j:5.20.0-alpine",
+        image="neo4j:5.20.0-bullseye",
         username=settings.neo4j_user,
         password=settings.neo4j_password
     ).with_env('NEO4J_PLUGINS', '["apoc"]') \
