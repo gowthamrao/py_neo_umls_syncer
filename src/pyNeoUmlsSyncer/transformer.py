@@ -1,141 +1,105 @@
-"""
-ETL Transformer for UMLS Data.
+import csv
+from pathlib import Path
+from typing import Dict, List, Tuple
+from collections import defaultdict
+from .models import Concept, Code, InterConceptRelationship, SemanticType, ConceptToCodeRelationship
+from .biolink_mapper import get_biolink_category, get_biolink_predicate
+from rich.console import Console
 
-This module takes the parsed RRF data and transforms it into the target
-Labeled Property Graph (LPG) schema defined in `models.py`. It handles
-the logic for selecting preferred names, mapping to Biolink, and aggregating
-relationship provenance.
-"""
-import logging
-from typing import Dict, List, Set, Tuple
-from tqdm import tqdm
+console = Console()
 
-from .models import Concept, Code, HasCodeRelationship, ConceptRelationship
-from .parser import UmlsParser, UmlsTerm
-from .biolink_mapper import mapper as biolink_mapper
-
-logger = logging.getLogger(__name__)
-
-class UmlsTransformer:
+class CSVTransformer:
     """
-    Orchestrates the transformation of parsed UMLS data into graph-ready objects.
+    Transforms parsed UMLS data into CSV files suitable for Neo4j's bulk import.
     """
-    def __init__(self, version: str):
-        """
-        Initializes the transformer for a specific UMLS version.
+    def __init__(self, csv_dir: str):
+        self.csv_dir = Path(csv_dir)
+        self.csv_dir.mkdir(parents=True, exist_ok=True)
+        console.log(f"CSV output directory set to: {self.csv_dir.resolve()}")
 
-        Args:
-            version: The UMLS release version string (e.g., "2024AA").
-                     This will be stamped on all created entities.
-        """
-        self.version = version
-        self.seen_codes: Set[str] = set()  # Tracks created Code nodes to prevent duplicates
+    def _write_csv(self, filename: str, header: List[str], rows: List[List[str]]):
+        """Utility to write data to a CSV file."""
+        filepath = self.csv_dir / filename
+        with open(filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(rows)
+        console.log(f"Wrote {len(rows)} rows to {filepath.name}")
 
-    def transform_data(
+    def _write_concept_nodes_csv(self, concepts: Dict[str, Concept], sty_map: Dict[str, List[SemanticType]]):
+        """Generates the CSV for Concept nodes."""
+        header = ["cui:ID(Concept-ID)", "preferred_name:string", ":LABEL"]
+        rows = []
+        for cui, concept in concepts.items():
+            semantic_types = sty_map.get(cui, [])
+            biolink_labels = {get_biolink_category(st.tui) for st in semantic_types}
+            # Ensure base :Concept label is always present
+            all_labels = ["Concept"] + sorted(list(biolink_labels))
+            rows.append([
+                concept.cui,
+                concept.preferred_name,
+                ";".join(all_labels)
+            ])
+        self._write_csv("nodes_concepts.csv", header, rows)
+
+    def _write_code_nodes_csv(self, codes: List[Code]):
+        """Generates the CSV for Code nodes."""
+        header = ["code_id:ID(Code-ID)", "sab:string", "name:string"]
+        # Use a set to handle duplicate codes that might arise from different term types
+        unique_codes = { (c.code_id, c.sab, c.name) for c in codes }
+        rows = [[code_id, sab, name] for code_id, sab, name in unique_codes]
+        self._write_csv("nodes_codes.csv", header, rows)
+
+    def _write_has_code_rels_csv(self, rels: List[ConceptToCodeRelationship]):
+        """Generates the CSV for (:Concept)-[:HAS_CODE]->(:Code) relationships."""
+        header = [":START_ID(Concept-ID)", ":END_ID(Code-ID)", ":TYPE"]
+        unique_rels = { (r.cui, r.code_id) for r in rels }
+        rows = [[cui, code_id, "HAS_CODE"] for cui, code_id in unique_rels]
+        self._write_csv("rels_has_code.csv", header, rows)
+
+    def _write_inter_concept_rels_csv(self, rels: List[InterConceptRelationship]):
+        """
+        Generates the CSV for inter-concept relationships, aggregating provenance.
+        """
+        header = [":START_ID(Concept-ID)", ":END_ID(Concept-ID)", "source_rela:string", "asserted_by_sabs:string[]", ":TYPE"]
+
+        # Aggregate relationships to merge provenance
+        agg_rels = defaultdict(set)
+        # We group by the core relationship tuple to collect all asserting SABs
+        for rel in rels:
+            # Key: (source_cui, target_cui, biolink_predicate, source_rela)
+            # The biolink predicate is part of the key to avoid merging, e.g., 'treats' and 'related_to'
+            # if their source_rela was different but mapped to the same predicate.
+            # A simpler key (source_cui, target_cui, source_rela) is also valid if we trust the source_rela.
+            key = (rel.source_cui, rel.target_cui, rel.source_rela)
+            agg_rels[key].add(rel.sab)
+
+        rows = []
+        for (source_cui, target_cui, source_rela), sabs in agg_rels.items():
+            biolink_predicate = get_biolink_predicate(source_rela)
+            rows.append([
+                source_cui,
+                target_cui,
+                source_rela,
+                ";".join(sorted(list(sabs))),
+                biolink_predicate
+            ])
+        self._write_csv("rels_inter_concept.csv", header, rows)
+
+    def transform_to_csvs(
         self,
-        cui_terms: Dict[str, List[UmlsTerm]],
-        cui_stys: Dict[str, Set[str]],
-        cui_rels: List[Tuple[str, str, str, str]]
-    ) -> Tuple[List[Concept], List[Code], List[HasCodeRelationship], List[ConceptRelationship]]:
+        concepts: Dict[str, Concept],
+        codes: List[Code],
+        concept_to_code_rels: List[ConceptToCodeRelationship],
+        inter_concept_rels: List[InterConceptRelationship],
+        sty_map: Dict[str, List[SemanticType]]
+    ):
         """
-        Main transformation method.
-
-        Args:
-            cui_terms: Parsed data from MRCONSO.RRF.
-            cui_stys: Parsed data from MRSTY.RRF.
-            cui_rels: Parsed data from MRREL.RRF.
-
-        Returns:
-            A tuple containing lists of all transformed graph entities.
+        Orchestrates the transformation of all parsed data into CSV files.
         """
-        logger.info("Starting data transformation process...")
-
-        concepts, codes, has_code_rels = self._transform_concepts_and_codes(cui_terms, cui_stys)
-        concept_rels = self._transform_relationships(cui_rels, set(cui_terms.keys()))
-
-        logger.info(f"Transformation complete. Generated {len(concepts)} concepts, "
-                    f"{len(codes)} codes, and {len(concept_rels)} unique relationships.")
-        return concepts, codes, has_code_rels, concept_rels
-
-    def _transform_concepts_and_codes(
-        self,
-        cui_terms: Dict[str, List[UmlsTerm]],
-        cui_stys: Dict[str, Set[str]]
-    ) -> Tuple[List[Concept], List[Code], List[HasCodeRelationship]]:
-        """Transforms CUIs into Concept nodes, Code nodes, and HAS_CODE relationships."""
-        all_concepts: List[Concept] = []
-        all_codes: List[Code] = []
-        all_has_code_rels: List[HasCodeRelationship] = []
-
-        logger.info(f"Transforming {len(cui_terms)} CUIs into Concepts and Codes...")
-        for cui, terms in tqdm(cui_terms.items(), desc="Transforming Concepts"):
-            # 1. Select the preferred term for the Concept's name
-            preferred_term = UmlsParser.select_preferred_name(terms)
-
-            # 2. Map semantic types to Biolink categories
-            semantic_types = cui_stys.get(cui, set())
-            biolink_categories = {biolink_mapper.get_biolink_category(tui) for tui in semantic_types}
-            if not biolink_categories:
-                biolink_categories.add(biolink_mapper.default_category)
-
-            concept = Concept(
-                cui=cui,
-                preferred_name=preferred_term.name,
-                biolink_categories=biolink_categories,
-                last_seen_version=self.version
-            )
-            all_concepts.append(concept)
-
-            # 3. Create Code nodes and HAS_CODE relationships for all associated terms
-            for term in terms:
-                code_id = f"{term.sab}:{term.code}"
-
-                if code_id not in self.seen_codes:
-                    code = Code(
-                        code_id=code_id,
-                        sab=term.sab,
-                        name=term.name,
-                        last_seen_version=self.version
-                    )
-                    all_codes.append(code)
-                    self.seen_codes.add(code_id)
-
-                has_code_rel = HasCodeRelationship(cui=cui, code_id=code_id)
-                all_has_code_rels.append(has_code_rel)
-
-        return all_concepts, all_codes, all_has_code_rels
-
-    def _transform_relationships(
-        self,
-        cui_rels: List[Tuple[str, str, str, str]],
-        valid_cuis: Set[str]
-    ) -> List[ConceptRelationship]:
-        """Transforms raw relationship tuples into aggregated ConceptRelationship objects."""
-        logger.info(f"Transforming and aggregating {len(cui_rels)} raw relationships...")
-
-        # Key: (source_cui, target_cui, rel_type), Value: ConceptRelationship
-        aggregated_rels: Dict[Tuple[str, str, str], ConceptRelationship] = {}
-
-        for cui1, cui2, rela, sab in tqdm(cui_rels, desc="Aggregating Relationships"):
-            # Ensure relationships only connect concepts that are actually in our dataset
-            if cui1 not in valid_cuis or cui2 not in valid_cuis:
-                continue
-
-            rel_type = biolink_mapper.get_biolink_predicate(rela)
-            key = (cui1, cui2, rel_type)
-
-            if key not in aggregated_rels:
-                new_rel = ConceptRelationship(
-                    source_cui=cui1,
-                    target_cui=cui2,
-                    rel_type=rel_type,
-                    source_rela=rela,
-                    asserted_by_sabs={sab},
-                    last_seen_version=self.version
-                )
-                aggregated_rels[key] = new_rel
-            else:
-                # Aggregate provenance by adding the SAB
-                aggregated_rels[key].asserted_by_sabs.add(sab)
-
-        return list(aggregated_rels.values())
+        console.log("Starting transformation of parsed data to CSV files...")
+        self._write_concept_nodes_csv(concepts, sty_map)
+        self._write_code_nodes_csv(codes)
+        self._write_has_code_rels_csv(concept_to_code_rels)
+        self._write_inter_concept_rels_csv(inter_concept_rels)
+        console.log("[green]CSV transformation complete.[/green]")

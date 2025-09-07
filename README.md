@@ -1,123 +1,143 @@
 # pyNeoUmlsSyncer
 
-`pyNeoUmlsSyncer` is a production-ready Python package for creating and maintaining a UMLS (Unified Medical Language System) Labeled Property Graph (LPG) in a Neo4j (v5.x) database. It is designed for high performance, reliability, and standards compliance.
+**A production-ready Python package for creating and maintaining a UMLS (Unified Medical Language System) Labeled Property Graph (LPG) in Neo4j (v5.x).**
 
-## Key Features
+This package is designed to be highly optimized, robust, and standardized, implementing a sophisticated, idempotent incremental update strategy to keep your biomedical knowledge graph in sync with the latest UMLS releases.
 
-- **High-Performance ETL**: Utilizes Python's multiprocessing for efficient parsing of large UMLS RRF files.
-- **Optimized Loading Strategies**:
-  - **Initial Load**: Generates CSVs for the ultra-fast `neo4j-admin database import` command.
-  - **Incremental Load**: Uses `apoc.periodic.iterate` for resilient, batched transactional updates to an existing database.
-- **Reliable Synchronization**: Implements a sophisticated **"Snapshot Diff"** strategy. It processes UMLS change files (`DELETEDCUI`, `MERGEDCUI`) and compares the new release snapshot against the database state to ensure the graph is a perfect reflection of the new version.
-- **Idempotent**: All loading processes are designed to be safely restartable without corrupting data.
-- **Biolink Model Compliant**: The graph schema is mapped to the Biolink Model for standardization and interoperability.
-- **Modern Tech Stack**: Built with Python 3.10+, Pydantic v2, Typer, and the official Neo4j driver.
+## Core Features
 
-## Graph Schema
-
-The LPG schema is designed to capture both conceptual relationships and source-level provenance.
-
-- **:Concept (`CUI`)**: The central node for a unique medical idea.
-  - Properties: `cui` (unique), `preferred_name`, `last_seen_version`.
-  - Additional Labels: Mapped Biolink categories (e.g., `:biolink:Disease`).
-
-- **:Code (`SAB:CODE`)**: Represents an atom from a source vocabulary.
-  - Properties: `code_id` (unique, e.g., "RXNORM:198440"), `sab`, `name`, `last_seen_version`.
-
-- **Relationships**:
-  - `(:Concept)-[:HAS_CODE]->(:Code)`: Connects a concept to its source codes.
-  - `(:Concept)-[:biolink:predicate]->(:Concept)`: Represents a relationship from `MRREL.RRF` (e.g., `:biolink:treats`). Provenance from multiple sources is aggregated into the `asserted_by_sabs` property.
+- **Automated Data Acquisition**: Authenticates with the UMLS UTS API, downloads the latest UMLS Rich Release Format (RRF) distribution, and verifies checksums.
+- **Optimized ETL**:
+    - **Parallel Parsing**: Utilizes Python's `multiprocessing` to rapidly parse large RRF files (`MRCONSO`, `MRREL`, `MRSTY`).
+    - **Bulk Loading**: Generates optimized CSVs and the precise command for `neo4j-admin database import`, the fastest way to ingest data into Neo4j.
+    - **Resilient Incremental Updates**: Uses `apoc.periodic.iterate` for batched, transactional updates, ensuring that synchronizations are efficient and can be safely restarted.
+- **Sophisticated "Snapshot Diff" Synchronization**: Implements an intelligent delta strategy that goes beyond simple additions. It correctly processes UMLS change files (`DELETEDCUI`, `MERGEDCUI`) and removes any stale nodes or relationships that were not present in the new release, ensuring the graph is a true reflection of the source.
+- **Biolink Model Standardization**: Maps UMLS semantic types (TUIs) and relationship attributes (RELAs) to Biolink-compliant categories and predicates, promoting data interoperability.
+- **Highly Maintainable**: Built with modern Python (3.10+), full type hinting, Pydantic v2+ for configuration, and Typer for a clean CLI.
 
 ## Installation
 
-It is recommended to install the package in a virtual environment.
-
 ```bash
-# Clone the repository
-git clone <repository_url>
-cd pyNeoUmlsSyncer
-
-# Install using pip
 pip install .
-
-# Or, if you use Poetry
-poetry install
+```
+For development, install in editable mode with testing dependencies:
+```bash
+pip install -e ".[test]"
 ```
 
 ## Configuration
 
-Configuration is managed via environment variables or a `.env` file in the project root.
+The package is configured via environment variables. You can set them in your shell or place them in a `.env` file in the root of your project directory.
 
-1.  **Create a `.env` file:**
-    ```
-    cp .env.example .env
-    ```
+**Crucially, you must provide your UMLS API key.**
 
-2.  **Edit the `.env` file:** The most critical setting is your UMLS API key.
+```bash
+# .env file
+# Required: Your UMLS API Key from the UTS website
+PYNEOUMLSSYNCER_UMLS_API_KEY="your-api-key-here"
 
-    ```dotenv
-    # .env file
-    # Required: Your UMLS API key from the UTS.
-    PYNEOUMLSSYNCER_UMLS_API_KEY="your-long-api-key-here"
+# --- Optional Overrides ---
+# Neo4j connection details
+PYNEOUMLSSYNCER_NEO4J_URI="neo4j://localhost:7687"
+PYNEOUMLSSYNCER_NEO4J_USER="neo4j"
+PYNEOUMLSSYNCER_NEO4J_PASSWORD="password"
+PYNEOUMLSSYNCER_NEO4J_DATABASE="neo4j"
 
-    # --- Optional: Database Connection ---
-    PYNEOUMLSSYNCER_NEO4J_URI="bolt://localhost:7687"
-    PYNEOUMLSSYNCER_NEO4J_USER="neo4j"
-    PYNEOUMLSSYNCER_NEO4J_PASSWORD="your_neo4j_password"
-    PYNEOUMLSSYNCER_NEO4J_DATABASE="neo4j"
-
-    # --- Optional: ETL and Filter Settings ---
-    # A comma-separated list of source vocabularies (SABs) to include.
-    # Example:
-    # PYNEOUMLSSYNCER_SAB_FILTER="SNOMEDCT_US,RXNORM,HGNC,HPO,MSH"
-    ```
+# Comma-separated list of source vocabularies to include
+PYNEOUMLSSYNCER_SAB_FILTER="RXNORM,SNOMEDCT_US,MTH,MSH,LNC"
+```
 
 ## Usage
 
-The package provides a command-line interface, `py-neo-umls-syncer`.
+The primary entry point is the `py-neo-umls-syncer` command-line interface.
 
-### 1. Initial Bulk Load
+### Step 1: Initial Bulk Import
 
-This is a one-time operation to populate an empty database. It is extremely fast as it uses `neo4j-admin`.
+The first time you populate your database, you must use the `full-import` command. This will download the latest UMLS release, process it, and generate the necessary command for Neo4j's offline bulk importer.
 
 ```bash
-py-neo-umls-syncer initial-load --version 2024AA --output-dir ./import_data
+py-neo-umls-syncer full-import
+```
+
+This command will produce output that includes a shell command block like this:
+
+```bash
+# IMPORTANT: The target Neo4j database must be stopped before running this command.
+# Example: `neo4j stop -d neo4j`
+
+neo4j-admin database import full \
+    --nodes=Concept-ID="/path/to/pyNeoUmlsSyncer/csv_output/nodes_concepts.csv" \
+    --nodes=Code-ID="/path/to/pyNeoUmlsSyncer/csv_output/nodes_codes.csv" \
+    --relationships=HAS_CODE="/path/to/pyNeoUmlsSyncer/csv_output/rels_has_code.csv" \
+    --relationships=RELATED="/path/to/pyNeoUmlsSyncer/csv_output/rels_inter_concept.csv" \
+    --overwrite-destination=true \
+    neo4j
+```
+
+You must **stop your Neo4j database** and then copy, paste, and execute this command in your terminal to perform the high-speed data import.
+
+### Step 2: Incremental Synchronization
+
+For all subsequent UMLS releases, you will use the `incremental-sync` command. This connects to a live Neo4j database and applies the "Snapshot Diff" update.
+
+You must provide the version of the new release you are synchronizing.
+
+```bash
+# Example for the May 2025 release
+py-neo-umls-syncer incremental-sync --version "2025AB"
 ```
 
 This command will:
-1.  Download and extract the specified UMLS version.
-2.  Parse and transform the data.
-3.  Generate CSV files and an `import.sh` script in the `./import_data` directory.
+1.  Download the specified UMLS release (if not already present).
+2.  Process UMLS change files to delete and merge concepts.
+3.  Load all new and updated information, tagging it with the new version.
+4.  Delete any data from the graph that was not tagged with the new version.
+5.  Update a metadata node in the graph to lock in the new version number.
 
-**To complete the import:**
-1.  **STOP** your Neo4j database service: `neo4j stop`
-2.  From the project root, run the generated script: `./import_data/import.sh`
-3.  **START** your Neo4j database service: `neo4j start`
+## Graph Schema
 
-### 2. Incremental Update
+The generated Labeled Property Graph (LPG) has the following structure:
 
-This command updates an existing database to a newer UMLS version.
+-   **Nodes**:
+    -   `:Concept`: Represents a single UMLS Concept (CUI).
+        - Properties: `cui` (unique), `preferred_name`, `last_seen_version`.
+        - Additional Labels: Mapped Biolink Categories (e.g., `:biolink:Disease`).
+    -   `:Code`: Represents a source-level identifier (e.g., an RxNorm code).
+        - Properties: `code_id` (unique, e.g., "RXNORM:198440"), `sab`, `name`, `last_seen_version`.
 
-```bash
-py-neo-umls-syncer incremental-update --version 2024AB
-```
+-   **Relationships**:
+    -   `(:Concept)-[:HAS_CODE]->(:Code)`: Connects a concept to its source codes.
+    -   `(:Concept)-[:RELATED]->(:Concept)`: A generic relationship connecting two concepts.
+        - Properties:
+            - `type`: The mapped Biolink Predicate (e.g., `biolink:treats`).
+            - `source_rela`: The original UMLS RELA/REL value.
+            - `asserted_by_sabs`: A list of source vocabularies asserting the relationship.
+            - `last_seen_version`: The UMLS release this relationship was last seen in.
 
-This command connects directly to the database and performs the full "Snapshot Diff" synchronization:
-1.  Connects to Neo4j to verify the current version.
-2.  Downloads and processes the new UMLS release.
-3.  Processes `DELETEDCUI.RRF` and `MERGEDCUI.RRF` to handle identity changes.
-4.  Merges the new snapshot data, updating the `last_seen_version` on all touched entities.
-5.  Deletes any entities from the database whose `last_seen_version` does not match the new version.
-6.  Updates the database's metadata to the new version number.
-
-## Development & Testing
+## Development
 
 To set up a development environment:
 
 ```bash
-# Install with dev dependencies
-poetry install
+# Clone the repository
+git clone https://github.com/your-org/pyNeoUmlsSyncer.git
+cd pyNeoUmlsSyncer
 
-# Run tests
+# Create and activate a virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install in editable mode with test dependencies
+pip install -e ".[test]"
+
+# Set up your .env file with your UMLS API key
+echo 'PYNEOUMLSSYNCER_UMLS_API_KEY="your-key-here"' > .env
+```
+
+### Running Tests
+
+The project includes an integration test suite using `pytest` and `testcontainers`. The tests will automatically spin up a Neo4j instance with the APOC plugin.
+
+```bash
 pytest
 ```

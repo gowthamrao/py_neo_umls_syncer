@@ -1,124 +1,133 @@
 import pytest
-from unittest.mock import MagicMock, call
+from neo4j import Driver
 from pathlib import Path
-
-from .mocks import mock_settings
-mock_settings()
+import csv
 
 from pyNeoUmlsSyncer.delta_strategy import DeltaStrategy
 
-@pytest.fixture
-def mock_loader():
-    """Provides a mocked instance of Neo4jLoader."""
-    return MagicMock()
+def _create_file(path: Path, content: list[list[str]]):
+    """Helper to create a pipe-delimited file for tests."""
+    with open(path, 'w', newline='') as f:
+        writer = csv.writer(f, delimiter='|')
+        writer.writerows(content)
 
-@pytest.fixture
-def rrf_path():
-    """Provides the path to the test RRF data."""
-    return Path(__file__).parent / "data" / "test_version" / "META"
-
-@pytest.fixture
-def delta_strategy(mock_loader, rrf_path):
-    """Provides an instance of DeltaStrategy with a mocked loader."""
-    return DeltaStrategy(loader=mock_loader, rrf_path=rrf_path, new_version="test_version")
-
-def test_process_deleted_cuis(delta_strategy, mock_loader):
+def test_merged_cui_logic(neo4j_driver: Driver, tmp_path: Path):
     """
-    Tests that DELETEDCUI.RRF is read and the correct Cypher is executed.
+    Tests the MERGEDCUI logic thoroughly, verifying relationship migration
+    and provenance merging as per the FRD.
     """
-    delta_strategy._process_deleted_cuis()
+    # 1. SETUP: Create the initial graph state in the test Neo4j instance.
+    with neo4j_driver.session() as session:
+        session.run("""
+        // Old Concept (to be merged)
+        CREATE (old:Concept {cui: 'C001', preferred_name: 'Old Name'})
+        CREATE (old)-[:HAS_CODE]->(:Code {code_id: 'SAB1:123', sab: 'SAB1', name: 'Old Code Name'})
 
-    # Assert that the loader's APOC method was called
-    mock_loader.execute_apoc_iterate.assert_called_once()
+        // New Concept (target of merge)
+        CREATE (new:Concept {cui: 'C002', preferred_name: 'New Name'})
+        CREATE (new)-[:HAS_CODE]->(:Code {code_id: 'SAB2:456', sab: 'SAB2', name: 'New Code Name'})
 
-    # Get the arguments passed to the mock
-    args, kwargs = mock_loader.execute_apoc_iterate.call_args
+        // Related concepts for relationship testing
+        CREATE (rel_target:Concept {cui: 'C003', preferred_name: 'Target Concept'})
+        CREATE (rel_source:Concept {cui: 'C004', preferred_name: 'Source Concept'})
 
-    # Check the data passed (it's a positional argument)
-    assert args[1] == [{'cui': 'C004'}]
-    assert "Deleting CUIs" in args[2]
+        // Relationships to be migrated and merged
+        // Outgoing relationship from 'old' that conflicts with 'new'
+        CREATE (old)-[:RELATED {source_rela: 'treats', asserted_by_sabs: ['SAB1']}]->(rel_target)
+        // Outgoing relationship from 'new' that conflicts with 'old'
+        CREATE (new)-[:RELATED {source_rela: 'treats', asserted_by_sabs: ['SAB2']}]->(rel_target)
 
-    # Check that the Cypher query contains the key logic
-    cypher_query = args[0]
-    assert "MATCH (c:Concept {cui: row.cui})" in cypher_query
-    assert "DETACH DELETE c, code" in cypher_query
-    assert "size((code)--()) = 1" in cypher_query # Ensures we don't delete shared codes
+        // Unique incoming relationship to 'old'
+        CREATE (rel_source)-[:RELATED {source_rela: 'associated_with', asserted_by_sabs: ['SAB3']}]->(old)
+        """)
 
-def test_process_merged_cuis(delta_strategy, mock_loader):
+    # Create a mock MERGEDCUI.RRF file
+    merged_cui_file = tmp_path / "MERGEDCUI.RRF"
+    _create_file(merged_cui_file, [['C001', 'C002']]) # Old CUI | New CUI
+
+    # 2. EXECUTE: Run the delta strategy for merging CUIs.
+    # We pass a dummy csv_dir as it's not used by this specific method.
+    strategy = DeltaStrategy(driver=neo4j_driver, new_version="test", csv_dir=tmp_path)
+    strategy.process_merged_cuis(merged_cui_file)
+
+    # 3. ASSERT: Verify the graph is in the correct final state.
+    with neo4j_driver.session() as session:
+        # Assert Old concept is deleted
+        old_concept_result = session.run("MATCH (c:Concept {cui: 'C001'}) RETURN c").single()
+        assert old_concept_result is None, "Old concept C001 should be deleted."
+
+        # Assert codes are migrated
+        new_concept_codes = session.run("""
+            MATCH (c:Concept {cui: 'C002'})-[:HAS_CODE]->(code:Code)
+            RETURN collect(code.code_id) as code_ids
+        """).single()
+        assert new_concept_codes is not None
+        # Use a set to ignore order
+        assert set(new_concept_codes['code_ids']) == {'SAB1:123', 'SAB2:456'}
+
+        # Assert relationship migration and provenance merge
+        merged_rel_result = session.run("""
+            MATCH (c:Concept {cui: 'C002'})-[r:RELATED]->(t:Concept {cui: 'C003'})
+            WHERE r.source_rela = 'treats'
+            RETURN r.asserted_by_sabs as sabs
+        """).single()
+        assert merged_rel_result is not None, "Merged relationship should exist."
+        # apoc.refactor.mergeNodes combines lists, so we check for both SABs
+        assert 'SAB1' in merged_rel_result['sabs']
+        assert 'SAB2' in merged_rel_result['sabs']
+
+        # Assert unique incoming relationship was migrated
+        migrated_incoming_rel = session.run("""
+            MATCH (s:Concept {cui: 'C004'})-[r:RELATED]->(c:Concept {cui: 'C002'})
+            WHERE r.source_rela = 'associated_with'
+            RETURN r
+        """).single()
+        assert migrated_incoming_rel is not None, "Incoming relationship should be migrated to new concept."
+
+
+def test_stale_entity_deletion(neo4j_driver: Driver, tmp_path: Path):
     """
-    Tests that MERGEDCUI.RRF is read and the correct APOC procedure is called.
+    Tests the Snapshot Diff strategy to ensure stale entities are correctly deleted.
     """
-    delta_strategy._process_merged_cuis()
+    # 1. SETUP: Create entities with different `last_seen_version` tags.
+    with neo4j_driver.session() as session:
+        session.run("""
+        // Stale entities (should be deleted)
+        CREATE (stale_concept:Concept {cui: 'C001', last_seen_version: 'v1'})
+        CREATE (stale_code:Code {code_id: 'SAB1:123', last_seen_version: 'v1'})
+        CREATE (stale_concept)-[r1:HAS_CODE {last_seen_version: 'v1'}]->(stale_code)
 
-    mock_loader.execute_apoc_iterate.assert_called_once()
-    args, kwargs = mock_loader.execute_apoc_iterate.call_args
+        // Kept entities (should remain)
+        CREATE (kept_concept:Concept {cui: 'C002', last_seen_version: 'v2'})
+        CREATE (kept_code:Code {code_id: 'SAB2:456', last_seen_version: 'v2'})
+        CREATE (kept_concept)-[r2:HAS_CODE {last_seen_version: 'v2'}]->(kept_code)
 
-    # Check data (it's a positional argument)
-    assert args[1] == [{'old_cui': 'C005', 'new_cui': 'C006'}]
-    assert "Merging CUIs" in args[2]
+        // A stale relationship between two kept concepts
+        CREATE (kept_concept)-[r3:RELATED {last_seen_version: 'v1'}]->(stale_concept)
+        """)
 
-    # Check that we are using the robust apoc.refactor.mergeNodes procedure
-    cypher_query = args[0]
-    assert "apoc.refactor.mergeNodes" in cypher_query
-    assert "mergeRels: true" in cypher_query
-    assert "properties: 'combine'" in cypher_query
+    # 2. EXECUTE: Run the stale entity removal process for 'v2'.
+    strategy = DeltaStrategy(driver=neo4j_driver, new_version="v2", csv_dir=tmp_path)
+    strategy.remove_stale_entities()
 
-def test_remove_stale_entities(delta_strategy, mock_loader):
-    """
-    Tests that the correct queries are executed to clean up stale data.
-    """
-    delta_strategy._remove_stale_entities()
+    # 3. ASSERT: Verify the correct entities were deleted.
+    with neo4j_driver.session() as session:
+        # Assert stale nodes are gone
+        stale_code_count = session.run("MATCH (c:Code {code_id: 'SAB1:123'}) RETURN count(c) as count").single()['count']
+        assert stale_code_count == 0, "Stale Code node should be deleted."
 
-    # We expect three separate calls to the driver's execute_query method
-    assert mock_loader.driver.execute_query.call_count == 3
+        # Note: Per our strategy, Concepts are only deleted via DELETEDCUI, not the stale cleanup.
+        # So, C001 should *remain* but be detached.
+        stale_concept_exists = session.run("MATCH (c:Concept {cui: 'C001'}) RETURN c").single() is not None
+        assert stale_concept_exists, "Stale Concept node should NOT be deleted by this process."
 
-    # Get all the calls
-    all_calls = mock_loader.driver.execute_query.call_args_list
+        # Assert stale relationships are gone
+        stale_rel_count = session.run("MATCH ()-[r]-() WHERE r.last_seen_version = 'v1' RETURN count(r) as count").single()['count']
+        assert stale_rel_count == 0, "All relationships with last_seen_version 'v1' should be deleted."
 
-    # Extract the Cypher from each call
-    executed_cypher = [c.args[0] for c in all_calls]
+        # Assert kept nodes and rels still exist
+        kept_code_count = session.run("MATCH (c:Code {code_id: 'SAB2:456'}) RETURN count(c) as count").single()['count']
+        assert kept_code_count == 1, "Kept Code node should still exist."
 
-    # Check for stale relationship deletion query
-    assert any("MATCH ()-[r]-() WHERE r.last_seen_version < $new_version" in q for q in executed_cypher)
-    assert any("DELETE r" in q for q in executed_cypher)
-
-    # Check for stale Code node deletion query
-    assert any("MATCH (c:Code) WHERE c.last_seen_version < $new_version" in q for q in executed_cypher)
-    assert any("size((c)--()) = 0" in q for q in executed_cypher) # Must be disconnected
-    assert any("DELETE c" in q for q in executed_cypher)
-
-    # Check for stale Concept node deletion query
-    assert any("MATCH (c:Concept) WHERE c.last_seen_version < $new_version" in q for q in executed_cypher)
-
-    # Check that new_version was passed as a parameter in all calls
-    for c in all_calls:
-        assert c.kwargs['new_version'] == 'test_version'
-
-def test_full_run_orchestration(delta_strategy, mock_loader):
-    """
-    Tests that the main `run_incremental_update` method calls its sub-methods
-    in the correct order.
-    """
-    # We can use a single mock to track the order of calls
-    mock_manager = MagicMock()
-    delta_strategy._process_deleted_cuis = mock_manager.delete
-    delta_strategy._process_merged_cuis = mock_manager.merge
-    delta_strategy._apply_snapshot_updates = mock_manager.apply
-    delta_strategy._remove_stale_entities = mock_manager.remove
-    mock_loader.update_umls_version = mock_manager.update_meta
-
-    # Dummy data for the snapshot
-    concepts, codes, has_code_rels, concept_rels = [], [], [], []
-
-    # Run the main method
-    delta_strategy.run_incremental_update(concepts, codes, has_code_rels, concept_rels)
-
-    # Check the call order
-    expected_calls = [
-        call.delete(),
-        call.merge(),
-        call.apply(concepts, codes, has_code_rels, concept_rels),
-        call.remove(),
-        call.update_meta("test_version")
-    ]
-    assert mock_manager.mock_calls == expected_calls
+        kept_rel_count = session.run("MATCH ()-[r]-() WHERE r.last_seen_version = 'v2' RETURN count(r) as count").single()['count']
+        assert kept_rel_count == 1, "Relationship with last_seen_version 'v2' should still exist."
