@@ -67,19 +67,47 @@ class DeltaStrategy:
         # MERGEDCUI.RRF contains CUI_OLD|CUI_NEW
         merges = [row for row in csv.reader(merged_cui_file.open('r'), delimiter='|')]
 
-        # Using apoc.refactor.mergeNodes is the most robust way to handle this.
-        # It correctly merges properties and migrates relationships.
+        # This query manually migrates relationships to ensure provenance is correctly merged,
+        # fulfilling the specific FRD requirement that `apoc.refactor.mergeNodes` cannot.
         query = """
         CALL apoc.periodic.iterate(
           'UNWIND $merges AS merge_op
            MATCH (old:Concept {cui: merge_op[0]}), (new:Concept {cui: merge_op[1]})
            RETURN old, new',
-          'CALL apoc.refactor.mergeNodes([old], new, {properties: "combine", mergeRels: true}) YIELD node
-           DETACH DELETE old',
-          {batchSize: 100, parallel: false, params: {merges: $merges}}
+          '
+            // Migrate outgoing relationships
+            CALL {
+                WITH old, new
+                MATCH (old)-[r]->(target:Concept) WHERE target <> new
+                CALL apoc.merge.relationship(new, type(r), {source_rela: r.source_rela}, {}, target) YIELD rel AS new_rel
+                SET new_rel.asserted_by_sabs = apoc.coll.union(coalesce(new_rel.asserted_by_sabs, []), r.asserted_by_sabs),
+                    new_rel.last_seen_version = $version
+                RETURN count(*) AS out_rels
+            }
+            // Migrate incoming relationships
+            CALL {
+                WITH old, new
+                MATCH (source:Concept)-[r]->(old) WHERE source <> new
+                CALL apoc.merge.relationship(source, type(r), {source_rela: r.source_rela}, {}, new) YIELD rel AS new_rel
+                SET new_rel.asserted_by_sabs = apoc.coll.union(coalesce(new_rel.asserted_by_sabs, []), r.asserted_by_sabs),
+                    new_rel.last_seen_version = $version
+                RETURN count(*) AS in_rels
+            }
+            // Migrate codes
+            CALL {
+                WITH old, new
+                MATCH (old)-[r:HAS_CODE]->(c:Code)
+                MERGE (new)-[new_r:HAS_CODE]->(c)
+                SET new_r.last_seen_version = $version
+                RETURN count(*) AS code_rels
+            }
+            // Finally, delete the old, now-isolated concept
+            DETACH DELETE old
+          ',
+          {batchSize: 5, parallel: false, params: {merges: $merges, version: $version}}
         )
         """
-        self._run_query(query, params={"merges": merges})
+        self._run_query(query, params={"merges": merges, "version": self.new_version})
         console.log(f"Submitted merge task for {len(merges)} CUI pairs.")
 
     def apply_additions_and_updates(self):
