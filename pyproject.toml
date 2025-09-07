@@ -1,35 +1,32 @@
 [tool.poetry]
-name = "pyNeoUmlsSyncer"
-version = "0.1.0"
-description = "A production-ready Python package for creating and maintaining a UMLS Labeled Property Graph (LPG) in Neo4j."
-authors = ["Jules, Principal Bioinformatics Data Architect"]
+name = "py-neo-umls-syncer"
+version = "1.0.0"
+description = "A production-ready Python package for creating and maintaining a UMLS Labeled Property Graph (LPG) in Neo4j (v5.x)."
+authors = ["Jules the AI Engineer"]
 readme = "README.md"
 packages = [{include = "pyNeoUmlsSyncer", from = "src"}]
+license = "MIT"
 
 [tool.poetry.dependencies]
 python = "^3.10"
-pydantic = "^2.5.3"
+typer = {extras = ["rich"], version = "^0.9.0"}
+pydantic = "^2.5.0"
 pydantic-settings = "^2.1.0"
-typer = {version = "^0.9.0", extras = ["rich"]}
 requests = "^2.31.0"
-neo4j = "^5.17.0"
-rich = "^13.7.0"
+tqdm = "^4.66.0"
+neo4j = "^5.14.0"
 
 [tool.poetry.group.dev.dependencies]
-pytest = "^7.4.3"
+pytest = "^7.4.0"
 pytest-cov = "^4.1.0"
-testcontainers = {version = "^3.7.1", extras = ["neo4j"]}
-ruff = "^0.1.9"
-
-[tool.poetry.scripts]
-py-neo-umls-syncer = "pyNeoUmlsSyncer.cli:app"
+testcontainers = {extras = ["neo4j"], version = "^3.7.0"}
+mypy = "^1.7.0"
+ruff = "^0.1.0"
 
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
-[tool.ruff]
-line-length = 88
-select = ["E", "W", "F", "I", "UP", "C4", "B"]
-ignore = ["B008"] # HOFs are fine
-src = ["src"]
+# This section makes the CLI command available after 'pip install'
+[tool.poetry.scripts]
+py-neo-umls-syncer = "pyNeoUmlsSyncer.cli:app"

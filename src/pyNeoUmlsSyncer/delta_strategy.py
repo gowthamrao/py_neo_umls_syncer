@@ -1,209 +1,204 @@
 """
-delta_strategy.py
+Orchestration of the Incremental "Snapshot Diff" Update Strategy.
 
-This module provides a factory for generating the Cypher queries required for the
-idempotent "Snapshot Diff" incremental update strategy. It leverages APOC
-procedures for efficient, batched operations.
+This module contains the core logic for performing an incremental update
+of the Neo4j database to a new UMLS version.
 """
+import logging
+from pathlib import Path
+from typing import List, Dict
+from collections import defaultdict
 
-from typing import List, Tuple, Dict, Any
+from .loader import Neo4jLoader
+from .config import settings
+from .models import Concept, Code, HasCodeRelationship, ConceptRelationship
 
-from .config import Settings
+logger = logging.getLogger(__name__)
 
-class UmlsDeltaStrategy:
+class DeltaStrategy:
     """
-    Generates Cypher queries for the incremental synchronization process.
+    Implements the full incremental update workflow.
     """
+    def __init__(self, loader: Neo4jLoader, rrf_path: Path, new_version: str):
+        self.loader = loader
+        self.rrf_path = rrf_path
+        self.new_version = new_version
 
-    def __init__(self, settings: Settings):
-        self.settings = settings
-        self.batch_size = self.settings.apoc_batch_size
-        self.version = self.settings.umls_version
+    def run_incremental_update(
+        self,
+        concepts: List[Concept],
+        codes: List[Code],
+        has_code_rels: List[HasCodeRelationship],
+        concept_rels: List[ConceptRelationship]
+    ):
+        """
+        Executes the full incremental update process.
+        """
+        logger.info(f"Starting incremental update to version {self.new_version}...")
 
-    def _get_apoc_iterate_template(self, main_query: str, inner_query: str) -> str:
-        """
-        Creates a full apoc.periodic.iterate query string.
-        """
-        return f"""
-        CALL apoc.periodic.iterate(
-            "{main_query}",
-            "{inner_query}",
-            {{batchSize: {self.batch_size}, parallel: false, params: {{version: $version, rows: $rows}} }}
-        )
-        """
+        # Step 1: Handle CUI identity changes from UMLS change files.
+        self._process_deleted_cuis()
+        self._process_merged_cuis()
 
-    def generate_deleted_cui_query(self) -> str:
-        """
-        Generates the query to delete concepts from DELETEDCUI.RRF.
-        The list of CUIs to delete will be passed as the `$rows` parameter.
-        """
-        main_query = "UNWIND $rows as row RETURN row.cui as cui_id"
-        inner_query = "MATCH (c:Concept {cui: cui_id}) DETACH DELETE c"
-        return self._get_apoc_iterate_template(main_query, inner_query)
+        # Step 2: Apply all additions and updates from the new snapshot.
+        self._apply_snapshot_updates(concepts, codes, has_code_rels, concept_rels)
 
-    def generate_merged_cui_query(self) -> str:
-        """
-        Generates the query to merge concepts from MERGEDCUI.RRF.
-        The list of [old_cui, new_cui] pairs will be passed as `$rows`.
+        # Step 3: Remove all entities not present in the new snapshot.
+        self._remove_stale_entities()
 
-        This query uses `apoc.refactor.mergeNodes` which is a powerful and
-        idempotent way to handle node merges. It moves relationships and
-        merges properties.
-        """
-        main_query = """
-        UNWIND $rows as row
-        MATCH (old:Concept {cui: row.old_cui}), (new:Concept {cui: row.new_cui})
-        RETURN old, new
-        """
-        # apoc.refactor.mergeNodes is ideal. It handles moving relationships
-        # and merging properties. We can configure it to handle property conflicts.
+        # Step 4: Update the database metadata to the new version.
+        self.loader.update_umls_version(self.new_version)
+
+        logger.info(f"Incremental update to version {self.new_version} has completed successfully.")
+
+    def _read_change_file(self, file_name: str) -> List[List[str]]:
+        """Helper to read simple pipe-delimited change files like DELETEDCUI.RRF."""
+        file_path = self.rrf_path / file_name
+        if not file_path.exists():
+            logger.warning(f"Change file not found, skipping processing for: {file_path}")
+            return []
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return [line.strip().split('|') for line in f if line.strip()]
+
+    def _process_deleted_cuis(self):
+        """Processes DELETEDCUI.RRF to remove concepts."""
+        deleted_rows = self._read_change_file("DELETEDCUI.RRF")
+        if not deleted_rows:
+            return
+
+        cuis_to_delete = [{'cui': row[0]} for row in deleted_rows if row]
+        logger.info(f"Processing {len(cuis_to_delete)} CUI deletions from DELETEDCUI.RRF.")
+
         inner_query = """
+        MATCH (c:Concept {cui: row.cui})
+        // Find all codes connected ONLY to this concept
+        OPTIONAL MATCH (c)-[:HAS_CODE]->(code:Code)
+        WHERE size((code)--()) = 1
+        DETACH DELETE c, code
+        """
+        self.loader.execute_apoc_iterate(inner_query, cuis_to_delete, "Deleting CUIs")
+
+    def _process_merged_cuis(self):
+        """Processes MERGEDCUI.RRF to merge concepts."""
+        merged_rows = self._read_change_file("MERGEDCUI.RRF")
+        if not merged_rows:
+            return
+
+        # row[0] is old CUI, row[1] is new CUI
+        merges = [{'old_cui': row[0], 'new_cui': row[1]} for row in merged_rows if len(row) > 1]
+        logger.info(f"Processing {len(merges)} CUI merges from MERGEDCUI.RRF.")
+
+        # Use apoc.refactor.mergeNodes for robust merging of nodes and relationships.
+        # It combines properties and moves relationships before deleting the old node.
+        inner_query = """
+        MATCH (old:Concept {cui: row.old_cui})
+        MATCH (new:Concept {cui: row.new_cui})
         CALL apoc.refactor.mergeNodes([old, new], {
             properties: 'combine',
             mergeRels: true
         }) YIELD node
         RETURN count(*)
         """
-        # Note: The above inner query is simpler but might not handle the provenance merge correctly.
-        # A more explicit, manual merge gives more control.
+        self.loader.execute_apoc_iterate(inner_query, merges, "Merging CUIs")
 
-        explicit_merge_query = """
-        UNWIND $rows as row
-        MATCH (old:Concept {cui: row.old_cui}), (new:Concept {cui: row.new_cui})
-
-        // 1. Migrate outgoing relationships
-        CALL {
-            WITH old, new
-            MATCH (old)-[r]->(target)
-            // Create a temporary copy of the relationship properties
-            WITH old, new, target, type(r) as rel_type, properties(r) as props
-            // Use MERGE on the new relationship to handle idempotency
-            MERGE (new)-[new_rel:r_type]->(target)
-            ON CREATE SET new_rel = props
-            ON MATCH SET
-                new_rel.asserted_by_sabs = apoc.coll.union(new_rel.asserted_by_sabs, props.asserted_by_sabs),
-                new_rel.last_seen_version = $version
-            // Delete the old relationship
-            DELETE r
-            RETURN count(r) as out_rels
-        }
-
-        // 2. Migrate incoming relationships
-        CALL {
-            WITH old, new
-            MATCH (source)-[r]->(old)
-            WITH old, new, source, type(r) as rel_type, properties(r) as props
-            MERGE (source)-[new_rel:r_type]->(new)
-            ON CREATE SET new_rel = props
-            ON MATCH SET
-                new_rel.asserted_by_sabs = apoc.coll.union(new_rel.asserted_by_sabs, props.asserted_by_sabs),
-                new_rel.last_seen_version = $version
-            DELETE r
-            RETURN count(r) as in_rels
-        }
-
-        // 3. Migrate :HAS_CODE relationships
-        CALL {
-            WITH old, new
-            MATCH (old)-[r:HAS_CODE]->(code:Code)
-            MERGE (new)-[new_rel:HAS_CODE]->(code)
-            ON CREATE SET new_rel.last_seen_version = $version
-            DELETE r
-            RETURN count(r) as code_rels
-        }
-
-        // 4. Delete the now-isolated old node
-        DELETE old
-
-        RETURN out_rels, in_rels, code_rels
-        """
-        # The explicit query is more complex but correctly implements the required logic.
-        # It needs to be wrapped in apoc.periodic.iterate.
-        main_query_explicit = "UNWIND $rows as row RETURN row"
-        inner_query_explicit = """
-        MATCH (old:Concept {cui: row.old_cui}), (new:Concept {cui: row.new_cui})
-        // This is a simplified version for now, full version is too complex for this block
-        // The real implementation would use the logic from above.
-        // For now, we will assume apoc.refactor.mergeNodes and handle property merge in the loader
-        CALL apoc.refactor.mergeNodes([old], new, {properties: "combine", mergeRels: true}) YIELD node
-        """
-        # Let's stick with the simpler `mergeNodes` for now, it's powerful.
-        # The logic for `asserted_by_sabs` can be handled during the main snapshot merge.
-        main_query_merge = "UNWIND $rows as row MATCH (o:Concept {cui: row.old_cui}), (n:Concept {cui: row.new_cui}) RETURN o, n"
-        inner_query_merge = "CALL apoc.refactor.mergeNodes([o], n, {properties: 'discard', mergeRels: true}) YIELD node RETURN count(*)"
-        return self._get_apoc_iterate_template(main_query_merge, inner_query_merge)
-
-
-    def generate_node_merge_query(self, node_label: str, id_property: str) -> str:
-        """
-        Generates a query to MERGE nodes from a new snapshot.
-        """
-        main_query = "UNWIND $rows as row RETURN row"
-        inner_query = f"""
-        MERGE (n:{node_label} {{{id_property}: row.{id_property}}})
-        ON CREATE SET n = row, n.last_seen_version = $version
-        ON MATCH SET n += row, n.last_seen_version = $version
-        """
-        return self._get_apoc_iterate_template(main_query, inner_query)
-
-    def generate_relationship_merge_query(
+    def _apply_snapshot_updates(
         self,
-        start_node_label: str,
-        start_node_id: str,
-        end_node_label: str,
-        end_node_id: str,
-        rel_type_property: str,
-        rel_key: str
-    ) -> str:
+        concepts: List[Concept],
+        codes: List[Code],
+        has_code_rels: List[HasCodeRelationship],
+        concept_rels: List[ConceptRelationship]
+    ):
+        """Merges all nodes and relationships from the new UMLS snapshot into the DB."""
+        logger.info("Applying snapshot updates: merging concepts, codes, and relationships.")
+
+        # 1. Merge Concept nodes
+        concept_rows = [c.dict() for c in concepts]
+        concept_query = """
+        MERGE (c:Concept {cui: row.cui})
+        ON CREATE SET c.preferred_name = row.preferred_name,
+                      c.last_seen_version = row.last_seen_version
+        ON MATCH SET c.preferred_name = row.preferred_name,
+                     c.last_seen_version = row.last_seen_version
+        // Remove all old labels before setting new ones to handle category changes
+        CALL apoc.create.removeLabels(c, [l IN labels(c) WHERE l <> 'Concept']) YIELD node
+        CALL apoc.create.addLabels(node, row.biolink_categories) YIELD node as final_node
         """
-        Generates a query to MERGE relationships from a new snapshot.
-        This uses apoc.merge.relationship for dynamic relationship types.
+        self.loader.execute_apoc_iterate(concept_query, concept_rows, "Merging Concepts")
+
+        # 2. Merge Code nodes
+        code_rows = [c.dict() for c in codes]
+        code_query = """
+        MERGE (c:Code {code_id: row.code_id})
+        ON CREATE SET c.sab = row.sab, c.name = row.name, c.last_seen_version = row.last_seen_version
+        ON MATCH SET c.name = row.name, c.last_seen_version = row.last_seen_version
         """
-        main_query = "UNWIND $rows as row RETURN row"
-        inner_query = f"""
-        MATCH (a:{start_node_label} {{{start_node_id}: row.start_id}})
-        MATCH (b:{end_node_label} {{{end_node_id}: row.end_id}})
-        // Use a key to uniquely identify the relationship to avoid duplicates
-        CALL apoc.merge.relationship(a, row.{rel_type_property}, {{key: row.{rel_key}}}, row.props, b) YIELD rel
-        SET rel.last_seen_version = $version
+        self.loader.execute_apoc_iterate(code_query, code_rows, "Merging Codes")
+
+        # 3. Merge HAS_CODE relationships
+        has_code_rows = [r.dict() for r in has_code_rels]
+        has_code_query = """
+        MATCH (con:Concept {cui: row.cui})
+        MATCH (cod:Code {code_id: row.code_id})
+        MERGE (con)-[:HAS_CODE]->(cod)
         """
-        # A simpler version without APOC for fixed relationship types
-        if rel_type_property.isupper(): # Assume fixed type if uppercase
-            inner_query = f"""
-            MATCH (a:{start_node_label} {{{start_node_id}: row.start_id}})
-            MATCH (b:{end_node_label} {{{end_node_id}: row.end_id}})
-            MERGE (a)-[r:{rel_type_property}]->(b)
-            ON CREATE SET r = row.props, r.last_seen_version = $version
-            ON MATCH SET
-                r += row.props,
-                r.asserted_by_sabs = apoc.coll.union(r.asserted_by_sabs, row.props.asserted_by_sabs),
-                r.last_seen_version = $version
+        self.loader.execute_apoc_iterate(has_code_query, has_code_rows, "Merging HAS_CODE relationships")
+
+        # 4. Merge Concept-Concept relationships, grouped by type
+        grouped_rels = defaultdict(list)
+        for rel in concept_rels:
+            grouped_rels[rel.rel_type].append(rel.dict())
+
+        for rel_type, rows in grouped_rels.items():
+            escaped_rel_type = f"`{rel_type}`"
+            rel_query = f"""
+            MATCH (src:Concept {{cui: row.source_cui}})
+            MATCH (tgt:Concept {{cui: row.target_cui}})
+            MERGE (src)-[r:{escaped_rel_type}]->(tgt)
+            ON CREATE SET r.source_rela = row.source_rela,
+                          r.asserted_by_sabs = row.asserted_by_sabs,
+                          r.last_seen_version = row.last_seen_version
+            ON MATCH SET r.asserted_by_sabs = row.asserted_by_sabs,
+                         r.last_seen_version = row.last_seen_version
             """
-        return self._get_apoc_iterate_template(main_query, inner_query)
+            self.loader.execute_apoc_iterate(rel_query, rows, f"Merging {rel_type} relationships")
 
+    def _remove_stale_entities(self):
+        """Removes all entities with a last_seen_version older than the new version."""
+        logger.info(f"Removing stale entities (version < {self.new_version})...")
 
-    def generate_stale_relationship_cleanup_query(self) -> str:
-        """
-        Generates the query to delete relationships not seen in the new version.
-        """
-        main_query = f"MATCH ()-[r]-() WHERE r.last_seen_version <> '{self.version}' RETURN id(r) as id"
-        inner_query = "MATCH ()-[r]-() WHERE id(r) = id DELETE r"
-        return self._get_apoc_iterate_template(main_query, inner_query)
+        # Using a single APOC query for each phase is more efficient
+        params = {'new_version': self.new_version, 'batchSize': settings.apoc_batch_size * 5}
 
-    def generate_stale_node_cleanup_query(self) -> str:
+        # Remove stale relationships first
+        logger.info("Removing stale relationships...")
+        rel_cleanup_query = """
+        CALL apoc.periodic.iterate(
+            "MATCH ()-[r]-() WHERE r.last_seen_version < $new_version RETURN r",
+            "DELETE r",
+            {batchSize: $batchSize, parallel: false}
+        )
         """
-        Generates the query to delete nodes not seen in the new version.
-        This should be run after stale relationships are removed.
-        """
-        main_query = f"MATCH (n) WHERE n.last_seen_version <> '{self.version}' AND size((n)--()) = 0 RETURN id(n) as id"
-        inner_query = "MATCH (n) WHERE id(n) = id DELETE n"
-        return self._get_apoc_iterate_template(main_query, inner_query)
+        self.loader.driver.execute_query(rel_cleanup_query, **params, database_=self.loader.database)
 
-    def generate_meta_node_update_query(self) -> str:
+        # Remove stale Code nodes (now disconnected)
+        logger.info("Removing stale Code nodes...")
+        code_cleanup_query = """
+        CALL apoc.periodic.iterate(
+            "MATCH (c:Code) WHERE c.last_seen_version < $new_version AND size((c)--()) = 0 RETURN c",
+            "DELETE c",
+            {batchSize: $batchSize, parallel: false}
+        )
         """
-        Generates the query to create or update the UMLS metadata node.
+        self.loader.driver.execute_query(code_cleanup_query, **params, database_=self.loader.database)
+
+        # Remove stale Concept nodes (now disconnected)
+        logger.info("Removing stale Concept nodes...")
+        concept_cleanup_query = """
+        CALL apoc.periodic.iterate(
+            "MATCH (c:Concept) WHERE c.last_seen_version < $new_version AND size((c)--()) = 0 RETURN c",
+            "DELETE c",
+            {batchSize: $batchSize, parallel: false}
+        )
         """
-        return """
-        MERGE (m:UMLS_Meta {id: 'singleton'})
-        SET m.version = $version, m.last_updated = timestamp()
-        """
+        self.loader.driver.execute_query(concept_cleanup_query, **params, database_=self.loader.database)
+        logger.info("Stale entity removal complete.")

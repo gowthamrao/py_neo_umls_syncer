@@ -1,238 +1,222 @@
 """
-loader.py
+Neo4j Database Loader.
 
-This module orchestrates the entire data loading process into Neo4j.
-It determines whether to perform an initial bulk import or an incremental update
-and executes the corresponding workflow.
+This module provides functionalities to load transformed UMLS data into a Neo4j
+database. It supports two strategies:
+1.  A high-speed bulk load using `neo4j-admin database import`.
+2.  An incremental, idempotent load using the Neo4j driver and APOC procedures.
 """
-import csv
 import logging
-import subprocess
+import csv
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Dict, Any, Iterable, Optional
+from collections import defaultdict
+from neo4j import GraphDatabase, Driver, exceptions
+from tqdm import tqdm
 
-from neo4j import GraphDatabase, Driver
+from .config import settings
+from .models import Concept, Code, HasCodeRelationship, ConceptRelationship
 
-from .config import Settings
-from .delta_strategy import UmlsDeltaStrategy
-from .parser import UmlsParser
-from .transformer import UmlsTransformer
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-class UmlsLoader:
-    """
-    Manages the connection to Neo4j and orchestrates the loading process.
-    """
+class Neo4jLoader:
+    """Manages connection and loading operations into a Neo4j database."""
+    def __init__(self):
+        self._driver: Optional[Driver] = None
+        self.database = settings.neo4j_database
+        # This path is relative to the directory specified in neo4j.conf (dbms.directories.import)
+        self.import_dir = Path(settings.neo4j_import_dir)
 
-    def __init__(self, settings: Settings):
-        self.settings = settings
-        self.driver = self._get_driver()
-        self.delta_strategy = UmlsDeltaStrategy(settings)
-        self.parser = UmlsParser(settings)
-        self.transformer = UmlsTransformer(settings, self.parser)
-        self.data_dir = Path(self.settings.data_dir)
-        self.version = self.settings.umls_version
-        self.transformed_csv_dir = self.data_dir / "transformed" / self.version
-
-    def _get_driver(self) -> Driver:
-        """Initializes and returns the Neo4j driver."""
-        logger.info(f"Connecting to Neo4j at {self.settings.neo4j_uri}...")
-        try:
-            driver = GraphDatabase.driver(
-                self.settings.neo4j_uri,
-                auth=(self.settings.neo4j_user, self.settings.neo4j_password)
-            )
-            driver.verify_connectivity()
-            logger.info("Neo4j connection successful.")
-            return driver
-        except Exception as e:
-            logger.error(f"Failed to connect to Neo4j: {e}")
-            raise
-
-    def is_database_empty(self) -> bool:
-        """Checks if the database has been previously initialized."""
-        logger.info("Checking if database is initialized...")
-        with self.driver.session(database=self.settings.neo4j_database) as session:
-            result = session.run("MATCH (m:UMLS_Meta) RETURN count(m) > 0 as exists")
-            is_initialized = result.single()["exists"]
-            logger.info(f"Database initialized: {is_initialized}")
-            return not is_initialized
-
-    def _run_command(self, command: List[str]):
-        """Executes a shell command."""
-        logger.info(f"Executing command: {' '.join(command)}")
-        subprocess.run(command, check=True)
-
-    def run_full_import(self):
-        """
-        Performs a full bulk import using neo4j-admin.
-        This assumes the Neo4j database is stopped.
-        """
-        logger.info("Starting full bulk import process...")
-        # 1. Generate CSVs
-        self.transformer.transform_for_bulk_import()
-
-        # 2. Build and run neo4j-admin import command
-        # This requires the user to stop the database first.
-        # We will print the command and instructions.
-
-        # 2. Build the neo4j-admin import command dynamically
-        command = [
-            "neo4j-admin", "database", "import", "full", self.settings.neo4j_database,
-            "--overwrite-destination=true",
-        ]
-
-        # Find node files
-        node_files = list(self.transformed_csv_dir.glob("*_nodes_header.csv"))
-        for header_file in node_files:
-            # e.g., concepts_nodes_header.csv -> "Concept"
-            label = header_file.name.split('_')[0].capitalize()
-            data_file = header_file.name.replace('_header.csv', '_data.csv')
-            command.append(f"--nodes={label}={header_file.resolve()},{self.transformed_csv_dir.joinpath(data_file).resolve()}")
-
-        # Find relationship files
-        rel_files = list(self.transformed_csv_dir.glob("*_rels_header.csv"))
-        for header_file in rel_files:
-            data_file = header_file.name.replace('_header.csv', '_data.csv')
-            command.append(f"--relationships={header_file.resolve()},{self.transformed_csv_dir.joinpath(data_file).resolve()}")
-
-        logger.info("The following command will be executed:")
-        logger.info(" ".join(command))
-        logger.warning("This requires the Neo4j database to be stopped. Please ensure it is stopped before proceeding.")
-        # We can add a confirmation prompt here in a real CLI
-
-        try:
-            self._run_command(command)
-            logger.info("Bulk import completed successfully.")
-            logger.info("Please start the Neo4j database to continue.")
-            # 3. Create schema constraints and meta node after import
-            self.create_schema_and_meta_node()
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Neo4j-admin import failed: {e}")
-            logger.error("Please check the output from neo4j-admin for more details.")
-            raise
-
-    def create_schema_and_meta_node(self):
-        """Creates DB constraints and the metadata node after a bulk import."""
-        logger.info("Creating database constraints and metadata node...")
-        with self.driver.session(database=self.settings.neo4j_database) as session:
-            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Concept) REQUIRE c.cui IS UNIQUE")
-            session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:Code) REQUIRE c.code_id IS UNIQUE")
-            session.run(
-                self.delta_strategy.generate_meta_node_update_query(),
-                version=self.version
-            )
-        logger.info("Schema and metadata created successfully.")
-
-    def _execute_apoc_iterate(self, query: str, rows: List[dict]):
-        """Executes a given APOC iterate query with a list of data rows."""
-        if not rows:
-            logger.info("No rows to process, skipping query execution.")
-            return
-
-        logger.info(f"Executing APOC query on {len(rows)} rows...")
-        with self.driver.session(database=self.settings.neo4j_database) as session:
+    @property
+    def driver(self) -> Driver:
+        """Initializes the Neo4j driver on first access."""
+        if self._driver is None:
+            logger.info(f"Initializing Neo4j driver for {settings.neo4j_uri}...")
             try:
-                # We don't need to unpack the results, just run it.
-                session.run(query, rows=rows, version=self.version)
-            except Exception as e:
-                logger.error(f"An error occurred during APOC execution: {e}")
+                self._driver = GraphDatabase.driver(
+                    settings.neo4j_uri,
+                    auth=(settings.neo4j_user, settings.neo4j_password)
+                )
+                self._driver.verify_connectivity()
+                logger.info("Neo4j driver initialized successfully.")
+            except exceptions.AuthError as e:
+                logger.error(f"Neo4j authentication failed: {e}")
                 raise
-
-    def _parse_change_file(self, filename: str) -> List[List[str]]:
-        """A simple parser for DELETEDCUI.RRF and MERGEDCUI.RRF."""
-        filepath = self.data_dir / self.version / filename
-        if not filepath.exists():
-            logger.warning(f"Change file not found: {filepath}. Skipping.")
-            return []
-        with open(filepath, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter='|')
-            # The files have a trailing delimiter, so the last column is empty
-            return [row[:-1] for row in reader]
-
-    def run_incremental_sync(self):
-        """
-        Performs an incremental update using the "Snapshot Diff" strategy.
-        This is a placeholder for the full logic which is highly complex.
-        """
-        logger.info("Starting incremental synchronization...")
-
-        # 1. Process DELETEDCUI.RRF
-        deleted_cuis = [{"cui": row[0]} for row in self._parse_change_file("DELETEDCUI.RRF")]
-        if deleted_cuis:
-            logger.info(f"Processing {len(deleted_cuis)} deleted CUIs...")
-            query = self.delta_strategy.generate_deleted_cui_query()
-            self._execute_apoc_iterate(query, deleted_cuis)
-
-        # 2. Process MERGEDCUI.RRF
-        merged_cuis = [{"old_cui": row[0], "new_cui": row[1]} for row in self._parse_change_file("MERGEDCUI.RRF")]
-        if merged_cuis:
-            logger.info(f"Processing {len(merged_cuis)} merged CUIs...")
-            query = self.delta_strategy.generate_merged_cui_query()
-            self._execute_apoc_iterate(query, merged_cuis)
-
-        # 3. Apply new snapshot (this is the most complex part)
-        # 3. Apply new snapshot by streaming from the transformer
-        logger.info("Applying new snapshot data...")
-        for entity_type, batch in self.transformer.stream_transformed_data():
-            logger.info(f"Merging {len(batch)} entities of type '{entity_type}'...")
-            query = ""
-            if entity_type == "concepts":
-                query = self.delta_strategy.generate_node_merge_query("Concept", "cui")
-            elif entity_type == "codes":
-                query = self.delta_strategy.generate_node_merge_query("Code", "code_id")
-            elif entity_type == "concept_has_code_rels":
-                query = self.delta_strategy.generate_relationship_merge_query(
-                    "Concept", "cui", "Code", "code_id", "HAS_CODE", ""
-                )
-            elif entity_type == "concept_concept_rels":
-                query = self.delta_strategy.generate_relationship_merge_query(
-                    "Concept", "cui", "Concept", "cui", "type", "key" # `type` and `key` are properties in the streamed dict
-                )
-
-            if query:
-                self._execute_apoc_iterate(query, batch)
-
-        # 4. Cleanup stale entities
-        logger.info("Cleaning up stale relationships...")
-        stale_rel_query = self.delta_strategy.generate_stale_relationship_cleanup_query()
-        self._execute_apoc_iterate(stale_rel_query, [])
-
-        logger.info("Cleaning up stale nodes...")
-        stale_node_query = self.delta_strategy.generate_stale_node_cleanup_query()
-        self._execute_apoc_iterate(stale_node_query, [])
-
-        # 5. Update metadata
-        logger.info("Updating metadata node...")
-        with self.driver.session(database=self.settings.neo4j_database) as session:
-            session.run(
-                self.delta_strategy.generate_meta_node_update_query(),
-                version=self.version
-            )
-
-        logger.info("Incremental synchronization complete.")
-
-    def run(self):
-        """
-        Main entry point to start the synchronization process.
-        """
-        if self.is_database_empty():
-            self.run_full_import()
-        else:
-            self.run_incremental_sync()
+            except Exception as e:
+                logger.error(f"Failed to connect to Neo4j at {settings.neo4j_uri}: {e}")
+                raise
+        return self._driver
 
     def close(self):
         """Closes the Neo4j driver connection."""
-        if self.driver:
-            self.driver.close()
-            logger.info("Neo4j connection closed.")
+        if self._driver is not None:
+            self._driver.close()
+            self._driver = None
+            logger.info("Neo4j driver closed.")
 
-if __name__ == '__main__':
-    # settings = Settings()
-    # loader = UmlsLoader(settings)
-    # loader.run()
-    # loader.close()
-    pass
+    def _write_csv(self, file_path: Path, header: List[str], rows: Iterable[List[str]]):
+        """Utility to write data to a CSV file with a progress bar."""
+        with open(file_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            # Since rows can be a large list, we wrap it with tqdm for progress
+            for row in tqdm(rows, desc=f"Writing {file_path.name}"):
+                writer.writerow(row)
+
+    def generate_bulk_import_files(
+        self,
+        output_dir: Path,
+        concepts: List[Concept],
+        codes: List[Code],
+        has_code_rels: List[HasCodeRelationship],
+        concept_rels: List[ConceptRelationship]
+    ):
+        """Generates all necessary CSV files and the import script for a bulk load."""
+        logger.info(f"Generating neo4j-admin import files in: {output_dir}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- Write Node Files ---
+        if concepts:
+            self._write_csv(
+                output_dir / "concepts.csv",
+                concepts[0].get_csv_header(),
+                (c.to_csv_row() for c in concepts)
+            )
+        if codes:
+            self._write_csv(
+                output_dir / "codes.csv",
+                codes[0].get_csv_header(),
+                (c.to_csv_row() for c in codes)
+            )
+
+        # --- Write Relationship Files ---
+        if has_code_rels:
+            self._write_csv(
+                output_dir / "rels-has_code.csv",
+                has_code_rels[0].get_csv_header(),
+                (r.to_csv_row() for r in has_code_rels)
+            )
+
+        # Group concept relationships by type and write separate files
+        grouped_rels = defaultdict(list)
+        for rel in concept_rels:
+            # Sanitize rel_type for use in filenames
+            sanitized_type = rel.rel_type.replace(":", "_")
+            grouped_rels[sanitized_type].append(rel)
+
+        for rel_type, rels in grouped_rels.items():
+            if rels:
+                self._write_csv(
+                    output_dir / f"rels-concepts-{rel_type}.csv",
+                    rels[0].get_csv_header(),
+                    (r.to_csv_row() for r in rels)
+                )
+
+        self._generate_import_script(output_dir)
+        logger.info("Bulk import file generation complete.")
+
+    def _generate_import_script(self, output_dir: Path):
+        """Creates a shell script to run the neo4j-admin import command."""
+        script_path = output_dir / "import.sh"
+        db_name = settings.neo4j_database
+
+        # Paths used inside the script are relative to the Neo4j import directory
+        relative_output_dir = output_dir.relative_to(Path.cwd()) # Assumes CWD is project root
+
+        cmd_parts = [
+            f"neo4j-admin database import full {db_name}",
+            "--overwrite-destination=true",
+            "--multiline-fields=true",
+        ]
+
+        for f in sorted(output_dir.glob("*.csv")):
+            if "concepts" in f.name:
+                cmd_parts.append(f"--nodes '{self.import_dir / relative_output_dir / f.name}'")
+            elif "codes" in f.name:
+                cmd_parts.append(f"--nodes '{self.import_dir / relative_output_dir / f.name}'")
+            elif "rels-has_code" in f.name:
+                cmd_parts.append(f"--relationships '{self.import_dir / relative_output_dir / f.name}'")
+            elif "rels-concepts" in f.name:
+                # Relationship type needs to be specified for concept rels
+                rel_type = f.stem.split("rels-concepts-")[1].replace("_", ":")
+                cmd_parts.append(f"--relationships '{rel_type}','{self.import_dir / relative_output_dir / f.name}'")
+
+        full_cmd = " \\\n  ".join(cmd_parts)
+
+        with open(script_path, 'w') as f:
+            f.write("#!/bin/bash\n\n")
+            f.write("# This script runs the neo4j-admin bulk import.\n")
+            f.write("# IMPORTANT: \n")
+            f.write(f"# 1. Stop your Neo4j database instance before running: `neo4j stop`\n")
+            f.write(f"# 2. The paths in this script assume your neo4j import directory is '{self.import_dir}'.\n")
+            f.write(f"#    Verify this path in your neo4j.conf (dbms.directories.import).\n")
+            f.write(f"# 3. Run this script from the project root directory.\n")
+            f.write(f"# 4. After completion, start your database: `neo4j start`\n\n")
+            f.write(full_cmd + "\n")
+
+        # Make the script executable
+        script_path.chmod(0o755)
+        logger.info(f"Generated import script at: {script_path}")
+
+    # --- Incremental Load Methods ---
+
+    def get_current_umls_version(self) -> Optional[str]:
+        """Queries the database for the version in the :UMLS_Meta node."""
+        query = "MATCH (m:UMLS_Meta) RETURN m.version AS version"
+        try:
+            records, _, _ = self.driver.execute_query(query, database_=self.database)
+            return records[0]["version"] if records else None
+        except Exception as e:
+            logger.error(f"Failed to query UMLS meta version: {e}")
+            return None
+
+    def update_umls_version(self, version: str):
+        """Sets the version in the :UMLS_Meta node."""
+        query = "MERGE (m:UMLS_Meta) SET m.version = $version"
+        try:
+            self.driver.execute_query(query, version=version, database_=self.database)
+            logger.info(f"Updated :UMLS_Meta version to {version}")
+        except Exception as e:
+            logger.error(f"Failed to update UMLS meta version: {e}")
+            raise
+
+    def execute_apoc_iterate(self, inner_query: str, rows: List[Dict[str, Any]], desc: str):
+        """
+        Executes a batched update using apoc.periodic.iterate.
+
+        Args:
+            inner_query: The Cypher query to execute for each batch item.
+            rows: A list of dictionaries, where each dict is a row to be processed.
+            desc: A description for the progress bar.
+        """
+        if not rows:
+            logger.info(f"No rows to process for '{desc}', skipping.")
+            return
+
+        outer_query = """
+        CALL apoc.periodic.iterate(
+            "UNWIND $rows AS row RETURN row",
+            $inner_query,
+            {batchSize: $batchSize, parallel: false, params: {rows: $rows}}
+        )
+        YIELD batches, total, errorMessages
+        RETURN batches, total, errorMessages
+        """
+        logger.info(f"Executing APOC iterate for '{desc}' ({len(rows)} rows)...")
+        try:
+            # This is a long-running query, so no timeout
+            records, _, _ = self.driver.execute_query(
+                outer_query,
+                rows=rows,
+                inner_query=inner_query,
+                batchSize=settings.apoc_batch_size,
+                database_=self.database
+            )
+            summary = records[0]
+            if summary["errorMessages"] and summary["errorMessages"]:
+                logger.error(f"APOC iterate for '{desc}' encountered errors: {summary['errorMessages']}")
+            else:
+                logger.info(f"APOC iterate for '{desc}' completed. Batches: {summary['batches']}, Total: {summary['total']}.")
+        except Exception as e:
+            logger.error(f"An exception occurred during APOC iterate for '{desc}': {e}", exc_info=True)
+            raise
