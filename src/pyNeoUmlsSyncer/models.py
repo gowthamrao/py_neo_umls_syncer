@@ -1,68 +1,57 @@
-"""
-Pydantic Models for the UMLS Labeled Property Graph (LPG) Schema.
-
-These models define the structure of the data as it is processed through the
-ETL pipeline, ensuring type safety and a consistent data representation before
-being loaded into Neo4j. They also include helpers for CSV serialization.
-"""
-from pydantic import BaseModel, Field
-from typing import Set, List
+from pydantic import BaseModel
+from typing import List, Optional
 
 class Concept(BaseModel):
-    """Represents a :Concept node, corresponding to a single CUI."""
-    cui: str = Field(..., description="The Concept Unique Identifier (CUI).")
-    preferred_name: str = Field(..., description="The selected preferred name for the concept.")
-    biolink_categories: Set[str] = Field(default_factory=set)
-    last_seen_version: str = Field(..., description="The UMLS version this entity was last observed in.")
-
-    def get_csv_header(self) -> List[str]:
-        return ["cui:ID(Concept)", "preferred_name", "last_seen_version", ":LABEL"]
-
-    def to_csv_row(self) -> List[str]:
-        labels = ";".join(["Concept"] + sorted(list(self.biolink_categories)))
-        return [self.cui, self.preferred_name, self.last_seen_version, labels]
+    """
+    Represents a single UMLS Concept (CUI).
+    This is a node in the graph with the :Concept label.
+    """
+    cui: str
+    preferred_name: str
+    # The last_seen_version will be handled by the loader, not in this model
 
 class Code(BaseModel):
-    """Represents a :Code node, corresponding to an atom in a source vocabulary."""
-    code_id: str = Field(..., description="Unique identifier, 'SAB:CODE'.")
-    sab: str = Field(..., description="The source vocabulary (SAB) of the code.")
-    name: str = Field(..., description="The string/name associated with the code.")
-    last_seen_version: str = Field(..., description="The UMLS version this entity was last observed in.")
+    """
+    Represents a source-level code (e.g., from RXNORM, SNOMEDCT).
+    This is a node in the graph with the :Code label.
+    """
+    code_id: str  # Format: SAB:CODE
+    sab: str
+    name: str
 
-    def get_csv_header(self) -> List[str]:
-        return ["code_id:ID(Code)", "sab", "name", "last_seen_version", ":LABEL"]
+class ConceptToCodeRelationship(BaseModel):
+    """
+    Represents the relationship from a Concept to a Code.
+    """
+    cui: str
+    code_id: str
 
-    def to_csv_row(self) -> List[str]:
-        return [self.code_id, self.sab, self.name, self.last_seen_version, "Code"]
+class InterConceptRelationship(BaseModel):
+    """
+    Represents a relationship between two Concepts, derived from MRREL.
+    This is a single assertion of a relationship from a given source.
+    """
+    source_cui: str
+    target_cui: str
+    source_rela: str  # The original UMLS RELA/REL
+    sab: str # The source vocabulary of the relationship assertion
 
-class HasCodeRelationship(BaseModel):
-    """Represents a [:HAS_CODE] relationship from a :Concept to a :Code."""
-    cui: str = Field(..., description="The CUI of the source :Concept node (:START_ID).")
-    code_id: str = Field(..., description="The code_id of the target :Code node (:END_ID).")
+class SemanticType(BaseModel):
+    """
+    Represents a semantic type assignment for a CUI from MRSTY.
+    This will be used to add Biolink category labels to :Concept nodes.
+    """
+    cui: str
+    tui: str
+    sty: str # Semantic Type Name
 
-    def get_csv_header(self) -> List[str]:
-        return [":START_ID(Concept)", ":END_ID(Code)"]
-
-    def to_csv_row(self) -> List[str]:
-        return [self.cui, self.code_id]
-
-class ConceptRelationship(BaseModel):
-    """Represents a relationship between two :Concept nodes, derived from MRREL."""
-    source_cui: str = Field(..., description="CUI of the source concept (:START_ID).")
-    target_cui: str = Field(..., description="CUI of the target concept (:END_ID).")
-    rel_type: str = Field(..., description="The Biolink-mapped relationship type.")
-    source_rela: str = Field(..., description="The original UMLS RELA.")
-    asserted_by_sabs: Set[str] = Field(default_factory=set)
-    last_seen_version: str = Field(..., description="The UMLS version this entity was last observed in.")
-
-    def get_csv_header(self) -> List[str]:
-        return [":START_ID(Concept)", ":END_ID(Concept)", "source_rela", "asserted_by_sabs:string[]", "last_seen_version"]
-
-    def to_csv_row(self) -> List[str]:
-        return [
-            self.source_cui,
-            self.target_cui,
-            self.source_rela,
-            ";".join(sorted(list(self.asserted_by_sabs))),
-            self.last_seen_version,
-        ]
+class ParsedData(BaseModel):
+    """
+    A container for all parsed data from the RRF files,
+    ready for the transformation stage.
+    """
+    concepts: List[Concept]
+    codes: List[Code]
+    concept_to_code_rels: List[ConceptToCodeRelationship]
+    inter_concept_rels: List[InterConceptRelationship]
+    semantic_types: List[SemanticType]

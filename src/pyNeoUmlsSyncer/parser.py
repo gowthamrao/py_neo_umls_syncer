@@ -1,240 +1,198 @@
-"""
-Parallelized Parser for UMLS Rich Release Format (RRF) files.
-
-This module is responsible for parsing the key RRF files (MRCONSO, MRSTY, MRREL)
-efficiently using multiprocessing. It filters and structures the data into
-a format ready for the transformation step.
-"""
-import logging
-import os
+import csv
 from pathlib import Path
+from typing import Dict, List, Tuple, Iterator, Any
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from typing import Dict, List, Set, Tuple, Iterator, Any, Callable
 from collections import defaultdict
-from pydantic import BaseModel
-from tqdm import tqdm
-from functools import partial
-
+import os
 from .config import settings
+from .models import Concept, Code, InterConceptRelationship, SemanticType, ConceptToCodeRelationship
+from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn
+from rich.console import Console
 
-logger = logging.getLogger(__name__)
+console = Console()
 
-# --- Data structures for parsing ---
+# Define column indices for RRF files for clarity
+# MRCONSO: https://www.ncbi.nlm.nih.gov/books/NBK9685/table/ch03.T.mrconso_rrf_file_descriptions_and/
+CUI_I, LAT_I, TS_I, LUI_I, STT_I, SUI_I, ISPREF_I, AUI_I, SAUI_I, SCUI_I, SDUI_I, SAB_I, TTY_I, CODE_I, STR_I, SRL_I, SUPPRESS_I, CVF_I = range(18)
+# MRREL: https://www.ncbi.nlm.nih.gov/books/NBK9685/table/ch03.T.mrrel_rrf_file_descriptions_and/
+CUI1_I, AUI1_I, STYPE1_I, REL_I, CUI2_I, AUI2_I, STYPE2_I, RELA_I, RUI_I, SRUI_I, SAB_REL_I, SL_I, RG_I, DIR_I, SUPPRESS_REL_I, CVF_REL_I = range(16)
+# MRSTY: https://www.ncbi.nlm.nih.gov/books/NBK9685/table/ch03.T.mrsty_rrf_file_descriptions_and/
+CUI_STY_I, TUI_I, STN_I, STY_I, ATUI_I, CVF_STY_I = range(6)
 
-class UmlsTerm(BaseModel):
-    """A temporary model to hold salient information from an MRCONSO row."""
-    cui: str
-    sab: str
-    tty: str
-    code: str
-    name: str
-    ts: str
-    stt: str
-    ispref: str
 
-# --- Column indices for RRF files for readability ---
+def _process_mrconso_chunk(chunk_info: Tuple[str, int, int]) -> List[Tuple]:
+    """Worker function to process a chunk of MRCONSO.RRF."""
+    filepath, start, end = chunk_info
+    results = []
+    with open(filepath, 'r', encoding='utf-8') as f:
+        f.seek(start)
+        reader = csv.reader(f, delimiter='|', quotechar='\x00')
+        while f.tell() < end:
+            try:
+                row = next(reader)
+                if row[SUPPRESS_I] in settings.suppression_handling or row[SAB_I] not in settings.sab_filter:
+                    continue
 
-class RRF_COLS:
-    class MRCONSO:
-        CUI = 0
-        LAT = 1
-        TS = 4
-        STT = 5
-        ISPREF = 6
-        SAB = 11
-        TTY = 12
-        CODE = 13
-        STR = 14
-        SUPPRESS = 16
+                # We only need a subset of info for the reduction phase
+                term_info = {
+                    "sab": row[SAB_I],
+                    "name": row[STR_I],
+                    "code": row[CODE_I],
+                    "ts": row[TS_I],
+                    "stt": row[STT_I],
+                    "ispref": row[ISPREF_I],
+                    "tty": row[TTY_I]
+                }
+                results.append((row[CUI_I], term_info))
+            except (StopIteration, IndexError):
+                break # End of file or malformed line
+    return results
 
-    class MRREL:
-        CUI1 = 0
-        CUI2 = 4
-        RELA = 7
-        SAB = 10
-        SUPPRESS = 14
+def _process_mrrel_chunk(chunk_info: Tuple[str, int, int]) -> List[InterConceptRelationship]:
+    """Worker function to process a chunk of MRREL.RRF."""
+    filepath, start, end = chunk_info
+    results = []
+    with open(filepath, 'r', encoding='utf-8') as f:
+        f.seek(start)
+        reader = csv.reader(f, delimiter='|', quotechar='\x00')
+        while f.tell() < end:
+            try:
+                row = next(reader)
+                # Filter based on SAB and ensure both concepts are in scope
+                if row[SAB_REL_I] not in settings.sab_filter:
+                    continue
 
-    class MRSTY:
-        CUI = 0
-        TUI = 1
+                results.append(InterConceptRelationship(
+                    source_cui=row[CUI1_I],
+                    target_cui=row[CUI2_I],
+                    source_rela=row[RELA_I] or row[REL_I], # Fallback to REL if RELA is empty
+                    sab=row[SAB_REL_I]
+                ))
+            except (StopIteration, IndexError):
+                break
+    return results
 
-# --- Top-level worker functions for multiprocessing ---
+def _get_file_chunks(filepath: str, num_chunks: int) -> List[Tuple[str, int, int]]:
+    """Splits a file into byte-offset chunks for parallel processing."""
+    file_size = os.path.getsize(filepath)
+    chunk_size = file_size // num_chunks
+    chunks = []
+    start = 0
+    with open(filepath, 'rb') as f:
+        while start < file_size:
+            end = min(start + chunk_size, file_size)
+            # Align end to the next newline character
+            if end < file_size:
+                f.seek(end)
+                f.readline()
+                end = f.tell()
 
-def _process_mrconso_chunk(
-    lines: List[str], sab_filter: Set[str], suppress_filter: Set[str]
-) -> Dict[str, List[UmlsTerm]]:
-    """Worker function to parse a chunk of MRCONSO.RRF lines."""
-    cui_terms: Dict[str, List[UmlsTerm]] = defaultdict(list)
+            chunks.append((filepath, start, end))
+            start = end
+            if start >= file_size:
+                break
+    return chunks
 
-    for line in lines:
-        fields = line.strip().split('|')
-        if len(fields) <= RRF_COLS.MRCONSO.SUPPRESS: continue
-        if fields[RRF_COLS.MRCONSO.LAT] != 'ENG': continue
 
-        sab = fields[RRF_COLS.MRCONSO.SAB]
-        suppress_flag = fields[RRF_COLS.MRCONSO.SUPPRESS]
+class RRFParser:
+    """Parses UMLS RRF files into structured Pydantic models."""
 
-        if sab not in sab_filter or suppress_flag in suppress_filter:
-            continue
+    def __init__(self, meta_dir: Path):
+        self.meta_dir = meta_dir
+        self.mrconso_path = str(meta_dir / "MRCONSO.RRF")
+        self.mrrel_path = str(meta_dir / "MRREL.RRF")
+        self.mrsty_path = str(meta_dir / "MRSTY.RRF")
 
-        term = UmlsTerm(
-            cui=fields[RRF_COLS.MRCONSO.CUI],
-            sab=sab,
-            tty=fields[RRF_COLS.MRCONSO.TTY],
-            code=fields[RRF_COLS.MRCONSO.CODE],
-            name=fields[RRF_COLS.MRCONSO.STR],
-            ts=fields[RRF_COLS.MRCONSO.TS],
-            stt=fields[RRF_COLS.MRCONSO.STT],
-            ispref=fields[RRF_COLS.MRCONSO.ISPREF]
-        )
-        cui_terms[term.cui].append(term)
+    def parse_mrsty(self) -> Dict[str, List[SemanticType]]:
+        """Parses MRSTY.RRF to get CUI -> [SemanticType] mapping."""
+        console.log("Parsing MRSTY.RRF...")
+        sty_map = defaultdict(list)
+        with open(self.mrsty_path, 'r', encoding='utf-8') as f:
+            reader = csv.reader(f, delimiter='|', quotechar='\x00')
+            for row in reader:
+                sty_map[row[CUI_STY_I]].append(SemanticType(
+                    cui=row[CUI_STY_I],
+                    tui=row[TUI_I],
+                    sty=row[STY_I]
+                ))
+        console.log(f"Parsed {len(sty_map)} CUIs with semantic types.")
+        return sty_map
 
-    return cui_terms
+    def _reduce_mrconso_results(self, all_term_info: List[Tuple]) -> Tuple[Dict[str, Concept], List[Code], List[ConceptToCodeRelationship]]:
+        """
+        Reduces the mapped MRCONSO data to produce Concepts (with preferred names) and Codes.
+        """
+        console.log("Reducing MRCONSO data to select preferred names...")
+        cui_terms = defaultdict(list)
+        for cui, term_info in all_term_info:
+            cui_terms[cui].append(term_info)
 
-def _process_mrsty_chunk(lines: List[str]) -> Dict[str, Set[str]]:
-    """Worker function to parse a chunk of MRSTY.RRF lines."""
-    cui_stys: Dict[str, Set[str]] = defaultdict(set)
-    for line in lines:
-        fields = line.strip().split('|')
-        if len(fields) <= RRF_COLS.MRSTY.TUI: continue
-        cui = fields[RRF_COLS.MRSTY.CUI]
-        tui = fields[RRF_COLS.MRSTY.TUI]
-        cui_stys[cui].add(tui)
-    return cui_stys
+        concepts = {}
+        codes = []
+        concept_to_code_rels = []
 
-def _process_mrrel_chunk(
-    lines: List[str], sab_filter: Set[str], suppress_filter: Set[str]
-) -> List[Tuple[str, str, str, str]]:
-    """Worker function to parse a chunk of MRREL.RRF lines."""
-    relationships = []
-
-    for line in lines:
-        fields = line.strip().split('|')
-        if len(fields) <= RRF_COLS.MRREL.SUPPRESS: continue
-
-        sab = fields[RRF_COLS.MRREL.SAB]
-        suppress_flag = fields[RRF_COLS.MRREL.SUPPRESS]
-
-        if sab not in sab_filter or suppress_flag in suppress_filter:
-            continue
-
-        if fields[2] != 'CUI' or fields[6] != 'CUI': continue
-
-        cui1 = fields[RRF_COLS.MRREL.CUI1]
-        cui2 = fields[RRF_COLS.MRREL.CUI2]
-        rela = fields[RRF_COLS.MRREL.RELA]
-
-        relationships.append((cui1, cui2, rela, sab))
-
-    return relationships
-
-# --- Main Parser Class ---
-
-class UmlsParser:
-    """Orchestrates the parallel parsing of UMLS RRF files."""
-    def __init__(self, rrf_path: Path):
-        if not rrf_path or not rrf_path.is_dir():
-            raise FileNotFoundError(f"RRF path does not exist or is not a directory: {rrf_path}")
-        self.rrf_path = rrf_path
-        self.max_workers = settings.max_parallel_processes or os.cpu_count()
-        self.chunk_size = 250_000
-        logger.info(f"UmlsParser initialized with {self.max_workers} workers.")
-
-    def _parse_file_parallel(self, file_name: str, worker_func: Callable, result_aggregator: Callable):
-        """Generic parallel file parser."""
-        file_path = self.rrf_path / file_name
-        if not file_path.exists():
-            raise FileNotFoundError(f"Required RRF file not found: {file_path}")
-
-        results = []
-        with ProcessPoolExecutor(max_workers=self.max_workers) as executor, open(file_path, 'r', encoding='utf-8') as f:
-            futures = {
-                executor.submit(worker_func, list(chunk))
-                for chunk in self._chunk_iterator(f, self.chunk_size)
-            }
-
-            progress_bar = tqdm(total=len(futures), desc=f"Parsing {file_name}")
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    results.append(result)
-                except Exception as e:
-                    logger.error(f"A worker process failed for {file_name}: {e}", exc_info=True)
-                progress_bar.update(1)
-            progress_bar.close()
-
-        return result_aggregator(results)
-
-    def _chunk_iterator(self, iterator: Iterator, chunk_size: int) -> Iterator[List[Any]]:
-        """Yields chunks of a given size from an iterator."""
-        chunk = []
-        for item in iterator:
-            chunk.append(item)
-            if len(chunk) >= chunk_size:
-                yield chunk
-                chunk = []
-        if chunk:
-            yield chunk
-
-    def get_cui_terms(self) -> Dict[str, List[UmlsTerm]]:
-        """Parses MRCONSO.RRF to get all terms for each CUI."""
-        worker = partial(
-            _process_mrconso_chunk,
-            sab_filter=set(settings.sab_filter),
-            suppress_filter=set(settings.suppression_handling)
-        )
-        def aggregate_terms(results: List[Dict[str, List[UmlsTerm]]]) -> Dict[str, List[UmlsTerm]]:
-            logger.info("Aggregating term data from all workers...")
-            aggregated = defaultdict(list)
-            for result_dict in results:
-                for cui, terms in result_dict.items():
-                    aggregated[cui].extend(terms)
-            return aggregated
-
-        return self._parse_file_parallel('MRCONSO.RRF', worker, aggregate_terms)
-
-    def get_cui_semantic_types(self) -> Dict[str, Set[str]]:
-        """Parses MRSTY.RRF to get all semantic types for each CUI."""
-        def aggregate_stys(results: List[Dict[str, Set[str]]]) -> Dict[str, Set[str]]:
-            logger.info("Aggregating semantic type data from all workers...")
-            aggregated = defaultdict(set)
-            for result_dict in results:
-                for cui, stys in result_dict.items():
-                    aggregated[cui].update(stys)
-            return aggregated
-
-        return self._parse_file_parallel('MRSTY.RRF', _process_mrsty_chunk, aggregate_stys)
-
-    def get_cui_relationships(self) -> List[Tuple[str, str, str, str]]:
-        """Parses MRREL.RRF to get all CUI-to-CUI relationships."""
-        worker = partial(
-            _process_mrrel_chunk,
-            sab_filter=set(settings.sab_filter),
-            suppress_filter=set(settings.suppression_handling)
-        )
-        def aggregate_rels(results: List[List[Tuple[str, str, str, str]]]) -> List[Tuple[str, str, str, str]]:
-            logger.info("Aggregating relationship data from all workers...")
-            return [item for sublist in results for item in sublist]
-
-        return self._parse_file_parallel('MRREL.RRF', worker, aggregate_rels)
-
-    @staticmethod
-    def select_preferred_name(terms: List[UmlsTerm]) -> UmlsTerm:
-        """Selects the best term to represent a CUI based on a priority ranking."""
         sab_priority_map = {sab: i for i, sab in enumerate(settings.sab_priority)}
-        best_term = None
-        best_rank = (float('inf'), float('inf'), float('inf'), float('inf'))
 
-        for term in terms:
-            sab_rank = sab_priority_map.get(term.sab, float('inf'))
-            ts_rank = 0 if term.ts == 'P' else 1
-            stt_rank = 0 if term.stt == 'PF' else (1 if term.stt == 'VO' else 2)
-            ispref_rank = 0 if term.ispref == 'Y' else 1
-            current_rank = (sab_rank, ts_rank, stt_rank, ispref_rank)
+        for cui, terms in cui_terms.items():
+            # Generate all code nodes and relationships
+            for term in terms:
+                code_id = f"{term['sab']}:{term['code']}"
+                codes.append(Code(code_id=code_id, sab=term['sab'], name=term['name']))
+                concept_to_code_rels.append(ConceptToCodeRelationship(cui=cui, code_id=code_id))
 
-            if best_term is None or current_rank < best_rank:
-                best_rank = current_rank
-                best_term = term
+            # Determine preferred name
+            terms.sort(key=lambda t: (
+                sab_priority_map.get(t['sab'], 999), # Lower is better
+                t['ts'] != 'P', # P is preferred
+                t['stt'] != 'PF', # PF is preferred
+                t['ispref'] != 'Y' # Y is preferred
+            ))
+            preferred_term = terms[0]
+            concepts[cui] = Concept(cui=cui, preferred_name=preferred_term['name'])
 
-        if not best_term: return terms[0]
-        return best_term
+        console.log(f"Reduced to {len(concepts)} concepts and {len(codes)} codes.")
+        return concepts, codes, concept_to_code_rels
+
+    def parse_files(self) -> Tuple[Dict[str, Concept], List[Code], List[ConceptToCodeRelationship], List[InterConceptRelationship], Dict[str, List[SemanticType]]]:
+        """Orchestrates the parallel parsing of all required RRF files."""
+        sty_map = self.parse_mrsty()
+
+        num_workers = settings.max_parallel_processes
+
+        all_mrconso_terms = []
+        all_mrrel_rels = []
+
+        with Progress(
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            "[progress.percentage]{task.percentage:>3.0f}%",
+            TimeElapsedColumn(),
+        ) as progress:
+            with ProcessPoolExecutor(max_workers=num_workers) as executor:
+                # MRCONSO
+                mrconso_chunks = _get_file_chunks(self.mrconso_path, num_workers * 4) # More chunks than workers
+                task1 = progress.add_task("Parsing MRCONSO...", total=len(mrconso_chunks))
+                futures1 = [executor.submit(_process_mrconso_chunk, chunk) for chunk in mrconso_chunks]
+                for future in as_completed(futures1):
+                    all_mrconso_terms.extend(future.result())
+                    progress.update(task1, advance=1)
+
+                # MRREL
+                mrrel_chunks = _get_file_chunks(self.mrrel_path, num_workers * 4)
+                task2 = progress.add_task("Parsing MRREL...", total=len(mrrel_chunks))
+                futures2 = [executor.submit(_process_mrrel_chunk, chunk) for chunk in mrrel_chunks]
+                for future in as_completed(futures2):
+                    all_mrrel_rels.extend(future.result())
+                    progress.update(task2, advance=1)
+
+        concepts, codes, concept_to_code_rels = self._reduce_mrconso_results(all_mrconso_terms)
+
+        # Filter relationships to only include concepts we actually parsed
+        valid_cuis = set(concepts.keys())
+        final_rels = [
+            rel for rel in all_mrrel_rels
+            if rel.source_cui in valid_cuis and rel.target_cui in valid_cuis
+        ]
+        console.log(f"Filtered relationships to {len(final_rels)} entries between known concepts.")
+
+        return concepts, codes, concept_to_code_rels, final_rels, sty_map

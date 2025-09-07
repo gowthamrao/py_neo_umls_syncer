@@ -1,55 +1,52 @@
 import pytest
 from neo4j import GraphDatabase, Driver
 from testcontainers.neo4j import Neo4jContainer
-
-from pyNeoUmlsSyncer.config import Settings
+from pathlib import Path
+import shutil
 
 @pytest.fixture(scope="session")
 def neo4j_container():
     """
-    A pytest fixture that starts a Neo4j container for the test session.
+    A pytest fixture that starts and stops a Neo4j container for the test session.
+    The container is configured with APOC plugins.
     """
-    # Use the official Neo4j container with APOC plugins
-    with Neo4jContainer(image="neo4j:5.17", apoc=True) as container:
+    with Neo4jContainer(
+        image="neo4j:5.18",  # Use a recent version
+        port=7687,
+        http_port=7474,
+        environ={
+            "NEO4J_PLUGINS": '["apoc"]',
+            "NEO4J_apoc_export_file_enabled": "true",
+            "NEO4J_apoc_import_file_enabled": "true",
+            "NEO4J_apoc_import_file_use__neo4j__config": "true",
+            "NEO4J_dbms_security_procedures_unrestricted": "apoc.*"
+        }
+    ) as container:
+        container.driver = container.get_driver()
         yield container
+        container.driver.close()
 
-@pytest.fixture(scope="session")
-def neo4j_driver(neo4j_container: Neo4jContainer) -> Driver:
-    """
-    A fixture that provides a configured Neo4j driver for the container.
-    """
-    uri = neo4j_container.get_connection_url()
-    user = neo4j_container.NEO4J_USER
-    password = neo4j_container.NEO4J_PASSWORD
-    driver = GraphDatabase.driver(uri, auth=(user, password))
-    yield driver
-    driver.close()
 
 @pytest.fixture
-def test_settings(neo4j_container: Neo4jContainer, tmp_path) -> Settings:
+def neo4j_driver(neo4j_container: Neo4jContainer):
     """
-    A fixture that provides a Settings object configured for the test environment.
-    It points to the test data directory and the test container.
+    Provides a driver to the test Neo4j container and cleans the database
+    before each test function.
     """
-    # Override settings to use the test container and test data
-    test_data_dir = tmp_path / "data"
-    test_data_dir.mkdir()
+    driver = neo4j_container.driver
+    # Clean database before each test
+    with driver.session() as session:
+        session.run("MATCH (n) DETACH DELETE n")
+    yield driver
 
-    # This is a bit of a hack to make the settings work with the test data structure
-    # The parser expects the versioned folder to be inside the data_dir
-    versioned_data_dir = test_data_dir
-    (versioned_data_dir / "2024AA").mkdir(parents=True, exist_ok=True)
 
-    # Copy sample data into the temporary test data directory
-    import shutil
-    shutil.copytree("tests/data/2024AA", str(versioned_data_dir / "2024AA"), dirs_exist_ok=True)
-
-    return Settings(
-        umls_api_key="fake-key",
-        umls_version="2024AA",
-        neo4j_uri=neo4j_container.get_connection_url(),
-        neo4j_user=neo4j_container.NEO4J_USER,
-        neo4j_password=neo4j_container.NEO4J_PASSWORD,
-        data_dir=str(test_data_dir),
-        sab_filter=[], # No filter for tests
-    )
+@pytest.fixture
+def test_csv_dir() -> Path:
+    """
+    Creates a temporary directory for test CSV files.
+    """
+    test_dir = Path("./test_csv_output")
+    test_dir.mkdir(exist_ok=True)
+    yield test_dir
+    # Teardown: remove the directory after tests are done
+    shutil.rmtree(test_dir)

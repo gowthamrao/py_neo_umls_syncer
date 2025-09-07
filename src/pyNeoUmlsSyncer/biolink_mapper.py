@@ -1,89 +1,99 @@
 """
-Biolink Model Mapping Service.
+This module provides mappings from UMLS to the Biolink Model.
 
-This module provides a service for mapping UMLS identifiers to their
-corresponding Biolink Model concepts. It uses simple, file-based mappings
-to allow for easy updates and configuration without changing the code.
+NOTE: These mappings are representative and not exhaustive. A production-grade
+system would require a more comprehensive and curated mapping, potentially
+leveraging external resources or services from the NCATS Translator community.
+The Biolink Model is the ultimate source of truth: https://github.com/biolink/biolink-model
 """
 
-import csv
-from pathlib import Path
-from typing import Dict, Optional
-import logging
+# Default mappings for unclassified entities
+DEFAULT_BIOLINK_CATEGORY = "biolink:NamedThing"
+DEFAULT_BIOLINK_PREDICATE = "biolink:related_to"
 
-# Set up logger
-logger = logging.getLogger(__name__)
+# UMLS Semantic Type (TUI) to Biolink Category Mapping
+# A selection of common mappings.
+UMLS_TUI_TO_BIOLINK_CATEGORY = {
+    # Disorders
+    "T019": "biolink:Disease",  # Congenital Abnormality
+    "T020": "biolink:Disease",  # Acquired Abnormality
+    "T037": "biolink:Disease",  # Injury or Poisoning
+    "T047": "biolink:Disease",  # Disease or Syndrome
+    "T048": "biolink:Disease",  # Mental or Behavioral Dysfunction
+    "T049": "biolink:Disease",  # Cell or Molecular Dysfunction
+    "T190": "biolink:Disease",  # Anatomical Abnormality
+    "T191": "biolink:Disease",  # Neoplastic Process
+    # Chemicals & Drugs
+    "T109": "biolink:ChemicalEntity", # Organic Chemical
+    "T116": "biolink:AminoAcidSequence", # Amino Acid, Peptide, or Protein
+    "T121": "biolink:Drug",  # Pharmacologic Substance
+    "T123": "biolink:ChemicalEntity", # Biologically Active Substance
+    "T197": "biolink:ChemicalEntity", # Inorganic Chemical
+    "T200": "biolink:Drug",  # Clinical Drug
+    # Genes & Molecular
+    "T028": "biolink:Gene",  # Gene or Genome
+    "T114": "biolink:NucleicAcidSequence", # Nucleotide Sequence
+    # Anatomy
+    "T017": "biolink:AnatomicalEntity",  # Anatomical Structure
+    "T023": "biolink:AnatomicalEntity",  # Body Part, Organ, or Organ Component
+    "T024": "biolink:Tissue",  # Tissue
+    "T025": "biolink:Cell",  # Cell
+    "T026": "biolink:CellularComponent",  # Cell Component
+    # Phenotypes & Findings
+    "T033": "biolink:PhenotypicFeature",  # Finding
+    "T034": "biolink:LaboratoryFinding", # Laboratory or Test Result
+    "T184": "biolink:SignOrSymptom",  # Sign or Symptom
+    # Procedures
+    "T061": "biolink:Procedure",  # Therapeutic or Preventive Procedure
+    # Biological Processes
+    "T039": "biolink:PhysiologicalProcess", # Physiologic Function
+    "T040": "biolink:OrganismalProcess", # Organism Function
+    "T041": "biolink:PathologicalProcess", # Pathologic Function
+    "T043": "biolink:BiologicalProcess",  # Cell Function
+}
 
-class BiolinkMapper:
-    """
-    Loads and provides access to UMLS-to-Biolink mappings.
-    """
-    def __init__(self, resource_dir: Optional[Path] = None):
-        """
-        Initializes the mapper by loading mapping files from the resource directory.
+# UMLS Relationship Attribute (RELA) to Biolink Predicate Mapping
+# This mapping is highly context-dependent. The REL value (the semantic relationship)
+# is often more important than the RELA (the attribute). This is a simplified mapping.
+# See https://www.ncbi.nlm.nih.gov/books/NBK9684/table/ch03.T.relationship_attributes_in_mrrelrr/?report=objectonly
+UMLS_RELA_TO_BIOLINK_PREDICATE = {
+    "treats": "biolink:treats",
+    "treated_by": "biolink:treated_by",
+    "isa": "biolink:subclass_of",
+    "part_of": "biolink:part_of",
+    "has_part": "biolink:has_part",
+    "associated_with": "biolink:related_to",
+    "causes": "biolink:causes",
+    "caused_by": "biolink:caused_by",
+    "location_of": "biolink:location_of",
+    "has_location": "biolink:located_in", # Note inversion
+    "diagnoses": "biolink:diagnoses",
+    "diagnosed_by": "biolink:biomarker_for", # Approximation
+    "prevents": "biolink:prevents",
+    "prevented_by": "biolink:prevented_by",
+    "produces": "biolink:produces",
+    "produced_by": "biolink:produced_by",
+    "contraindicated_with": "biolink:contraindicated_in",
+}
 
-        Args:
-            resource_dir: The directory containing mapping files. If None, defaults
-                          to the 'resources' subdirectory next to this file.
-        """
-        if resource_dir is None:
-            resource_dir = Path(__file__).parent / "resources"
 
-        self.tui_to_category: Dict[str, str] = self._load_mapping(
-            resource_dir / "tui_to_biolink.tsv", "TUI to Category"
-        )
-        self.rela_to_predicate: Dict[str, str] = self._load_mapping(
-            resource_dir / "rela_to_biolink.tsv", "RELA to Predicate"
-        )
+def get_biolink_category(tui: str) -> str:
+    """Maps a UMLS TUI to a Biolink Category."""
+    return UMLS_TUI_TO_BIOLINK_CATEGORY.get(tui, DEFAULT_BIOLINK_CATEGORY)
 
-        self.default_category = "biolink:NamedThing"
-        self.default_predicate = "biolink:related_to"
+def get_biolink_predicate(rela: str) -> str:
+    """Maps a UMLS RELA to a Biolink Predicate."""
+    # RELA values are often descriptive phrases, so we look for keywords.
+    # This is a simplistic approach; a more robust solution would be needed for production.
+    rela_lower = rela.lower()
 
-    def _load_mapping(self, file_path: Path, mapping_name: str) -> Dict[str, str]:
-        """Loads a two-column TSV mapping file into a dictionary."""
-        mapping: Dict[str, str] = {}
-        if not file_path.exists():
-            logger.warning(
-                f"Mapping file not found for '{mapping_name}': {file_path}. "
-                "The mapping will be empty."
-            )
-            return mapping
+    # Direct mapping for common cases
+    if rela_lower in UMLS_RELA_TO_BIOLINK_PREDICATE:
+        return UMLS_RELA_TO_BIOLINK_PREDICATE[rela_lower]
 
-        with open(file_path, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f, delimiter='\t')
-            for i, row in enumerate(reader):
-                if not row or row[0].strip().startswith('#'):
-                    continue
-                if len(row) >= 2:
-                    key = row[0].strip()
-                    value = row[1].strip()
-                    mapping[key] = value
-                else:
-                    logger.warning(
-                        f"Skipping malformed row {i+1} in '{file_path}': {row}"
-                    )
+    # Keyword-based mapping for other cases
+    for keyword, predicate in UMLS_RELA_TO_BIOLINK_PREDICATE.items():
+        if keyword in rela_lower:
+            return predicate
 
-        logger.info(f"Successfully loaded {len(mapping)} entries for '{mapping_name}' from {file_path}")
-        return mapping
-
-    def get_biolink_category(self, tui: str) -> str:
-        """
-        Maps a UMLS TUI (Semantic Type Identifier) to a Biolink Model category.
-
-        If no specific mapping is found, returns a default category.
-        """
-        return self.tui_to_category.get(tui, self.default_category)
-
-    def get_biolink_predicate(self, rela: str) -> str:
-        """
-        Maps a UMLS RELA (Relationship Attribute) to a Biolink Model predicate.
-
-        Note: This is a simplified direct mapping. A production system may
-        require more complex logic considering the CUI's types and the REL.
-        If no specific mapping is found, returns a default predicate.
-        """
-        return self.rela_to_predicate.get(rela, self.default_predicate)
-
-# Create a single, importable instance for the application to use.
-# This avoids reloading the mapping files repeatedly.
-mapper = BiolinkMapper()
+    return DEFAULT_BIOLINK_PREDICATE
