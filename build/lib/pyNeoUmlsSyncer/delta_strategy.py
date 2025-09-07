@@ -74,8 +74,7 @@ class DeltaStrategy:
           'UNWIND $merges AS merge_op
            MATCH (old:Concept {cui: merge_op[0]}), (new:Concept {cui: merge_op[1]})
            RETURN old, new',
-          'CALL apoc.refactor.mergeNodes([old], new, {properties: "combine", mergeRels: true}) YIELD node
-           DETACH DELETE old',
+          'CALL apoc.refactor.mergeNodes([old], new, {properties: "combine", mergeRels: true}) YIELD node RETURN count(*)',
           {batchSize: 100, parallel: false, params: {merges: $merges}}
         )
         """
