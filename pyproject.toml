@@ -6,14 +6,14 @@ build-backend = "setuptools.build_meta"
 name = "py-neo-umls-syncer"
 version = "0.1.0"
 authors = [
-  { name="Jules", email="jules@example.com" },
+  { name="Gowtham Rao", email="rao@ohdsi.org" },
 ]
 description = "A production-ready Python package for creating and maintaining a UMLS Labeled Property Graph in Neo4j."
 readme = "README.md"
 requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
