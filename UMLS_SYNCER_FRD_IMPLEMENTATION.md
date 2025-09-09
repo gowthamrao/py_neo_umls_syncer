@@ -1,6 +1,6 @@
 ## Overview
 
-This pull request introduces the `pyNeoUmlsSyncer` package, a production-ready Python solution for creating and maintaining a UMLS Labeled Property Graph (LPG) in Neo4j (v5.x). The implementation adheres strictly to the specifications outlined in the Functional Requirements Document (FRD), focusing on optimization, robustness, Biolink standardization, and a sophisticated, idempotent incremental update strategy.
+This pull request introduces the `py_neo_umls_syncer` package, a production-ready Python solution for creating and maintaining a UMLS Labeled Property Graph (LPG) in Neo4j (v5.x). The implementation adheres strictly to the specifications outlined in the Functional Requirements Document (FRD), focusing on optimization, robustness, Biolink standardization, and a sophisticated, idempotent incremental update strategy.
 
 This submission includes the complete package source code, `pyproject.toml` for dependency management, and comprehensive integration tests.
 
@@ -14,7 +14,7 @@ This section details how the implementation meets each requirement from the FRD,
 
 **Implementation:** The package is built on a modern Python stack. Configuration is managed by Pydantic models, ensuring type safety and easy validation. The CLI is powered by Typer, providing a user-friendly interface.
 
-**`src/pyNeoUmlsSyncer/config.py`:**
+**`src/py_neo_umls_syncer/config.py`:**
 ```python
 import multiprocessing
 from typing import List, Literal
@@ -24,7 +24,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Manages all configuration for the pyNeoUmlsSyncer package."""
+    """Manages all configuration for the py_neo_umls_syncer package."""
 
     # UMLS Credentials
     umls_api_key: str = Field(..., env="UMLS_API_KEY")
@@ -55,7 +55,7 @@ settings = Settings()
 
 **Implementation:** The `UmlsDownloader` class encapsulates all logic for interacting with the UMLS Terminology Services. It handles authentication, finds the latest release, downloads the zip file, and performs an MD5 checksum verification.
 
-**`src/pyNeoUmlsSyncer/downloader.py`:**
+**`src/py_neo_umls_syncer/downloader.py`:**
 ```python
 import hashlib
 import logging
@@ -93,7 +93,7 @@ class UmlsDownloader:
 
 **Implementation:** The `RrfParser` uses a `multiprocessing.Pool` to process large RRF files like `MRCONSO.RRF` and `MRREL.RRF` in parallel chunks. The `Transformer` then converts these parsed records into CSV files formatted for Neo4j's bulk importer.
 
-**`src/pyNeoUmlsSyncer/parser.py`:**
+**`src/py_neo_umls_syncer/parser.py`:**
 ```python
 import multiprocessing
 from pathlib import Path
@@ -128,7 +128,7 @@ class RrfParser:
 
 **Implementation:** The `models.py` file defines the schema using Pydantic, ensuring data consistency. The `BiolinkMapper` contains the logic to translate UMLS semantics into the Biolink standard. Node labels are dynamically added during the load process to include both `:Concept` and the appropriate Biolink category.
 
-**`src/pyNeoUmlsSyncer/models.py`:**
+**`src/py_neo_umls_syncer/models.py`:**
 ```python
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -171,7 +171,7 @@ class ConceptRelationship(BaseModel):
 
 **Implementation:** This is a critical and complex step. We use a Cypher query with `MERGE` to handle the relationship transfer and provenance aggregation atomically.
 
-**`src/pyNeoUmlsSyncer/delta_strategy.py` (Cypher Query):**
+**`src/py_neo_umls_syncer/delta_strategy.py` (Cypher Query):**
 ```cypher
 // Process MERGEDCUI.RRF via apoc.periodic.iterate
 // $batch is a list of {old_cui: "C000001", new_cui: "C000002"}
@@ -215,7 +215,7 @@ DETACH DELETE old
 
 **Implementation:** After parsing, the new snapshot data is loaded into Neo4j. The `MERGE` operation efficiently creates new entities and updates existing ones.
 
-**`src/pyNeoUmlsSyncer/loader.py` (Cypher Query for Relationships):**
+**`src/py_neo_umls_syncer/loader.py` (Cypher Query for Relationships):**
 ```cypher
 // MERGE relationships via apoc.periodic.iterate
 // $batch is a list of relationship objects from the transformer
@@ -237,7 +237,7 @@ ON MATCH SET
 
 **Implementation:** This query is the final step of the sync process. It finds any node or relationship that was not "touched" (i.e., its `last_seen_version` was not updated) during the current run and deletes it.
 
-**`src/pyNeoUmlsSyncer/delta_strategy.py` (Cypher Query):**
+**`src/py_neo_umls_syncer/delta_strategy.py` (Cypher Query):**
 ```cypher
 // This query is run for relationships, :Code nodes, and :Concept nodes
 CALL apoc.periodic.iterate(
@@ -259,7 +259,7 @@ import pytest
 from neo4j import Driver
 from testcontainers.neo4j import Neo4jContainer
 
-from pyNeoUmlsSyncer.loader import IncrementalLoader
+from py_neo_umls_syncer.loader import IncrementalLoader
 
 @pytest.fixture(scope="module")
 def neo4j_driver():

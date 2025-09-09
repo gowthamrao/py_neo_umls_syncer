@@ -4,7 +4,7 @@ from neo4j import Driver
 from pathlib import Path
 import csv
 
-from pyNeoUmlsSyncer.delta_strategy import DeltaStrategy
+from py_neo_umls_syncer.delta_strategy import DeltaStrategy
 
 def _create_file(path: Path, content: list[list[str]]):
     """Helper to create a pipe-delimited file for tests."""
