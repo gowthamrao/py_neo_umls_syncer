@@ -5,8 +5,8 @@ Tests for the RRFParser, focusing on complex logic like preferred name selection
 import pytest
 from pathlib import Path
 
-from pyNeoUmlsSyncer.parser import RRFParser
-from pyNeoUmlsSyncer.config import settings
+from py_neo_umls_syncer.parser import RRFParser
+from py_neo_umls_syncer.config import settings
 
 def test_preferred_name_selection_logic():
     """

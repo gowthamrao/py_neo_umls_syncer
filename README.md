@@ -1,5 +1,5 @@
 <!-- Jules was here -->
-# pyNeoUmlsSyncer
+# py_neo_umls_syncer
 
 **A production-ready Python package for creating and maintaining a UMLS (Unified Medical Language System) Labeled Property Graph (LPG) in Neo4j (v5.x).**
 
@@ -129,8 +129,8 @@ To set up a development environment:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/pyNeoUmlsSyncer.git
-cd pyNeoUmlsSyncer
+git clone https://github.com/your-org/py_neo_umls_syncer.git
+cd py_neo_umls_syncer
 
 # Create and activate a virtual environment
 python -m venv .venv

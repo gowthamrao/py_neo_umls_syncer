@@ -7,8 +7,8 @@ import subprocess
 import time
 import os
 
-from pyNeoUmlsSyncer.loader import Neo4jLoader
-from pyNeoUmlsSyncer.config import settings
+from py_neo_umls_syncer.loader import Neo4jLoader
+from py_neo_umls_syncer.config import settings
 
 # --- Test Data ---
 

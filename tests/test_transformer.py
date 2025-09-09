@@ -6,8 +6,8 @@ import pytest
 import csv
 from pathlib import Path
 
-from pyNeoUmlsSyncer.transformer import CSVTransformer
-from pyNeoUmlsSyncer.models import InterConceptRelationship
+from py_neo_umls_syncer.transformer import CSVTransformer
+from py_neo_umls_syncer.models import InterConceptRelationship
 
 def test_inter_concept_relationship_provenance_aggregation(test_csv_dir: Path):
     """
