@@ -56,12 +56,10 @@ def neo4j_container(tmp_path_factory):
     import_dir = tmp_path_factory.mktemp("neo4j_import")
     settings.neo4j_import_dir = str(import_dir)
 
-    container = Neo4jContainer(
-        image="neo4j:5.20.0-bullseye",
-        username=settings.neo4j_user,
-        password=settings.neo4j_password
-    ).with_env('NEO4J_PLUGINS', '["apoc"]') \
-     .with_volume_mapping(str(import_dir), "/import")
+    container = Neo4jContainer(image="neo4j:5.20.0-bullseye")
+    container.with_env("NEO4J_AUTH", f"{settings.neo4j_user}/{settings.neo4j_password}")
+    container.with_env('NEO4J_PLUGINS', '["apoc"]')
+    container.with_volume_mapping(str(import_dir), "/import")
 
     with container as c:
         yield c
