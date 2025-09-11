@@ -19,12 +19,18 @@ class Neo4jLoader:
     initial bulk import and incremental synchronization.
     """
 
-    def __init__(self):
-        self._driver = None
+    def __init__(self, driver: Driver = None):
+        from .downloader import UMLSDownloader
+        self._driver = driver
+        self._should_close_driver = driver is None
+        self.downloader = UMLSDownloader(
+            api_key=settings.umls_api_key,
+            download_dir=settings.download_dir
+        )
 
     def _get_driver(self) -> Driver:
-        """Initializes and returns a Neo4j driver instance."""
-        if self._driver is None or not self._driver.closed():
+        """Initializes and returns a Neo4j driver instance if not provided."""
+        if self._driver is None:
              self._driver = GraphDatabase.driver(
                 settings.neo4j_uri,
                 auth=(settings.neo4j_user, settings.neo4j_password)
@@ -32,10 +38,10 @@ class Neo4jLoader:
         return self._driver
 
     def close(self):
-        """Closes the Neo4j driver connection."""
-        if self._driver and not self._driver.closed():
+        """Closes the Neo4j driver connection if it was created by this instance."""
+        if self._driver and self._should_close_driver and not self._driver.closed():
             self._driver.close()
-            console.log("Neo4j driver connection closed.")
+            console.log("Owned Neo4j driver connection closed.")
 
     def run_bulk_import(self, meta_dir: Path, version: str):
         """
