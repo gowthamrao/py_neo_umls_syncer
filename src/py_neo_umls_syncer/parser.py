@@ -25,12 +25,15 @@ def _process_mrconso_chunk(chunk_info: Tuple[str, int, int]) -> List[Tuple]:
     """Worker function to process a chunk of MRCONSO.RRF."""
     filepath, start, end = chunk_info
     results = []
-    with open(filepath, 'r', encoding='utf-8') as f:
+    with open(filepath, 'rb') as f:
         f.seek(start)
-        reader = csv.reader(f, delimiter='|', quotechar='\x00')
-        while f.tell() < end:
+        # Read the entire chunk into memory. This is safe because _get_file_chunks ensures chunks are reasonable sizes.
+        chunk_content = f.read(end - start).decode('utf-8', errors='ignore')
+        reader = csv.reader(chunk_content.splitlines(), delimiter='|', quotechar='\x00')
+        for row in reader:
             try:
-                row = next(reader)
+                if len(row) <= SUPPRESS_I or len(row) <= SAB_I:
+                    continue
                 if row[SUPPRESS_I] in settings.suppression_handling or row[SAB_I] not in settings.sab_filter:
                     continue
 
@@ -45,20 +48,22 @@ def _process_mrconso_chunk(chunk_info: Tuple[str, int, int]) -> List[Tuple]:
                     "tty": row[TTY_I]
                 }
                 results.append((row[CUI_I], term_info))
-            except (StopIteration, IndexError):
-                break # End of file or malformed line
+            except IndexError:
+                continue # Skip malformed lines
     return results
 
 def _process_mrrel_chunk(chunk_info: Tuple[str, int, int]) -> List[InterConceptRelationship]:
     """Worker function to process a chunk of MRREL.RRF."""
     filepath, start, end = chunk_info
     results = []
-    with open(filepath, 'r', encoding='utf-8') as f:
+    with open(filepath, 'rb') as f:
         f.seek(start)
-        reader = csv.reader(f, delimiter='|', quotechar='\x00')
-        while f.tell() < end:
+        chunk_content = f.read(end - start).decode('utf-8', errors='ignore')
+        reader = csv.reader(chunk_content.splitlines(), delimiter='|', quotechar='\x00')
+        for row in reader:
             try:
-                row = next(reader)
+                if len(row) <= SAB_REL_I:
+                    continue
                 # Filter based on SAB and ensure both concepts are in scope
                 if row[SAB_REL_I] not in settings.sab_filter:
                     continue
@@ -69,8 +74,8 @@ def _process_mrrel_chunk(chunk_info: Tuple[str, int, int]) -> List[InterConceptR
                     source_rela=row[RELA_I] or row[REL_I], # Fallback to REL if RELA is empty
                     sab=row[SAB_REL_I]
                 ))
-            except (StopIteration, IndexError):
-                break
+            except IndexError:
+                continue
     return results
 
 def _get_file_chunks(filepath: str, num_chunks: int) -> List[Tuple[str, int, int]]:
