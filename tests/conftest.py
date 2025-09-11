@@ -35,8 +35,14 @@ def neo4j_container(test_import_dir: Path):
     container.with_env("NEO4J_apoc_import_file_use__neo4j__config", "true")
     container.with_env("NEO4J_dbms_security_procedures_unrestricted", "apoc.*")
     container.with_env("NEO4J_AUTH", "neo4j/password")
+    container.with_env("NEO4J_dbms_directories_import", "/import")
     # Mount the static temp dir to the container's import directory
-    container.with_volume_mapping(str(test_import_dir), "/var/lib/neo4j/import")
+    container.with_volume_mapping(str(test_import_dir), "/import")
+    # Run as current user to avoid permissions issues on the mounted volume
+    import os
+    container.with_env("NEO4J_UID", str(os.getuid()))
+    container.with_env("NEO4J_GID", str(os.getgid()))
+
 
     with container as c:
         c.driver = c.get_driver()
