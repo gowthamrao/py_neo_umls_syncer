@@ -5,6 +5,9 @@ from testcontainers.neo4j import Neo4jContainer
 from pathlib import Path
 import shutil
 
+import subprocess
+import os
+
 @pytest.fixture(scope="session")
 def test_import_dir() -> Path:
     """
@@ -12,13 +15,21 @@ def test_import_dir() -> Path:
     This directory is mounted into the Neo4j container.
     """
     import_dir = Path("/tmp/pyneo_test_import")
-    # Clean up the directory from previous runs
+    # Clean up the directory from previous runs, handling potential permission errors
     if import_dir.exists():
-        shutil.rmtree(import_dir)
+        try:
+            shutil.rmtree(import_dir)
+        except PermissionError:
+            subprocess.run(["sudo", "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(import_dir)], check=True)
+            shutil.rmtree(import_dir)
     import_dir.mkdir(parents=True, exist_ok=True)
     yield import_dir
     # Final cleanup after the session
-    shutil.rmtree(import_dir)
+    try:
+        shutil.rmtree(import_dir)
+    except PermissionError:
+        subprocess.run(["sudo", "chown", "-R", f"{os.getuid()}:{os.getgid()}", str(import_dir)], check=True)
+        shutil.rmtree(import_dir)
 
 
 @pytest.fixture(scope="session")
@@ -28,7 +39,7 @@ def neo4j_container(test_import_dir: Path):
     The container is configured with APOC plugins and a mounted import volume.
     """
     # Use the fluent API (`.with_...` methods) to avoid constructor conflicts.
-    container = Neo4jContainer(image="neo4j:5.18")
+    container = Neo4jContainer(image="neo4j:5.20.0-bullseye")
     container.with_env("NEO4J_PLUGINS", '["apoc"]')
     container.with_env("NEO4J_apoc_export_file_enabled", "true")
     container.with_env("NEO4J_apoc_import_file_enabled", "true")
@@ -38,10 +49,11 @@ def neo4j_container(test_import_dir: Path):
     container.with_env("NEO4J_dbms_directories_import", "/import")
     # Mount the static temp dir to the container's import directory
     container.with_volume_mapping(str(test_import_dir), "/import")
-    # Run as current user to avoid permissions issues on the mounted volume
-    import os
-    container.with_env("NEO4J_UID", str(os.getuid()))
-    container.with_env("NEO4J_GID", str(os.getgid()))
+    # The UID/GID settings cause issues in this environment, so we handle permissions
+    # during cleanup instead.
+    # import os
+    # container.with_env("NEO4J_UID", str(os.getuid()))
+    # container.with_env("NEO4J_GID", str(os.getgid()))
 
 
     with container as c:
@@ -59,6 +71,10 @@ def neo4j_driver(neo4j_container: Neo4jContainer):
     # Clean database before each test
     with driver.session() as session:
         session.run("MATCH (n) DETACH DELETE n")
+        # Also drop constraints to ensure a clean slate
+        constraints = session.run("SHOW CONSTRAINTS YIELD name").data()
+        for constraint in constraints:
+            session.run(f"DROP CONSTRAINT {constraint['name']}")
     yield driver
 
 @pytest.fixture

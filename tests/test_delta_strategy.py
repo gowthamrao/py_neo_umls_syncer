@@ -186,3 +186,38 @@ def test_apply_additions_and_updates(neo4j_driver: Driver, test_csv_dir: Path):
         assert treats_rel['r']['source_rela'] == 'treats'
         assert set(treats_rel['r']['asserted_by_sabs']) == {"RXNORM", "SNOMEDCT_US"}
         assert treats_rel['r']['last_seen_version'] == version
+
+
+def test_merged_cui_logic_non_existent_from_node(neo4j_driver: Driver, test_csv_dir: Path):
+    """
+    Tests that the MERGEDCUI logic handles cases where the 'from' CUI does not exist gracefully.
+    """
+    # 1. SETUP: Create a graph with only the 'to' concept.
+    with neo4j_driver.session() as session:
+        session.run("CREATE (:Concept {cui: 'C002', preferred_name: 'New Name'})")
+        initial_node_count = session.run("MATCH (n) RETURN count(n) as count").single()['count']
+        initial_rel_count = session.run("MATCH ()-[r]->() RETURN count(r) as count").single()['count']
+
+    # Create a mock MERGEDCUI.RRF file pointing from a non-existent CUI
+    merged_cui_file = test_csv_dir / "MERGEDCUI.RRF"
+    _create_file(merged_cui_file, [['C001', 'C002']]) # C001 does not exist
+
+    # 2. EXECUTE: Run the delta strategy for merging CUIs.
+    strategy = DeltaStrategy(driver=neo4j_driver, new_version="test", import_dir=test_csv_dir)
+    strategy.process_merged_cuis(merged_cui_file)
+
+    # 3. ASSERT: Verify that the graph state is unchanged.
+    with neo4j_driver.session() as session:
+        # Assert 'from' concept still doesn't exist
+        old_concept_result = session.run("MATCH (c:Concept {cui: 'C001'}) RETURN c").single()
+        assert old_concept_result is None, "Non-existent 'from' concept C001 should not have been created."
+
+        # Assert 'to' concept is untouched
+        new_concept = session.run("MATCH (c:Concept {cui: 'C002'}) RETURN c").single()['c']
+        assert new_concept['preferred_name'] == 'New Name'
+
+        # Assert counts are the same
+        final_node_count = session.run("MATCH (n) RETURN count(n) as count").single()['count']
+        final_rel_count = session.run("MATCH ()-[r]->() RETURN count(r) as count").single()['count']
+        assert final_node_count == initial_node_count, "Node count should not change."
+        assert final_rel_count == initial_rel_count, "Relationship count should not change."
