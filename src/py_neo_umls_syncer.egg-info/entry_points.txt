@@ -1,2 +1,2 @@
 [console_scripts]
-py-neo-umls-syncer = pyNeoUmlsSyncer.cli:app
+py-neo-umls-syncer = py_neo_umls_syncer.cli:app

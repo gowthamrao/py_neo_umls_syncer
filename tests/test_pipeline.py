@@ -9,6 +9,7 @@ import os
 
 from py_neo_umls_syncer.loader import Neo4jLoader
 from py_neo_umls_syncer.config import settings
+from py_neo_umls_syncer.delta_strategy import DeltaStrategy
 
 # --- Test Data ---
 
@@ -50,28 +51,6 @@ MERGEDCUI = "C0000004|C0000002\n"
 
 
 @pytest.fixture(scope="module")
-def neo4j_container(tmp_path_factory):
-    """Spins up a Neo4j container with APOC installed and a mounted import dir."""
-    # Create a temporary directory on the host that will be mounted into the container
-    import_dir = tmp_path_factory.mktemp("neo4j_import")
-    settings.neo4j_import_dir = str(import_dir)
-
-    container = Neo4jContainer(image="neo4j:5.20.0-bullseye")
-    container.with_env("NEO4J_AUTH", f"{settings.neo4j_user}/{settings.neo4j_password}")
-    container.with_env('NEO4J_PLUGINS', '["apoc"]')
-    container.with_volume_mapping(str(import_dir), "/import")
-
-    with container as c:
-        yield c
-
-@pytest.fixture(scope="module")
-def neo4j_driver(neo4j_container):
-    """Provides a driver to the running Neo4j container."""
-    driver = neo4j_container.get_driver()
-    yield driver
-    driver.close()
-
-@pytest.fixture(scope="module")
 def setup_umls_data(tmp_path_factory):
     """Creates mock UMLS release directories and files."""
     root_dir = tmp_path_factory.mktemp("umls_data")
@@ -108,7 +87,7 @@ class TestPipeline:
         # Instead of running neo4j-admin, we simulate the load using APOC for simplicity
         # This still validates the CSVs are correct.
         # The import_dir is already configured in the neo4j_container fixture
-        strategy = loader.delta_strategy.DeltaStrategy(neo4j_driver, VERSION, Path(settings.neo4j_import_dir))
+        strategy = DeltaStrategy(neo4j_driver, VERSION, Path(settings.neo4j_import_dir))
         strategy.apply_additions_and_updates()
 
         # Now run the metadata initialization

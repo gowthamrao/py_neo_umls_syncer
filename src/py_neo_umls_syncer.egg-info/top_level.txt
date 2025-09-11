@@ -1,1 +1,1 @@
-pyNeoUmlsSyncer
+py_neo_umls_syncer
