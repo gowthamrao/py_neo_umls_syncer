@@ -18,6 +18,7 @@ src/py_neo_umls_syncer.egg-info/dependency_links.txt
 src/py_neo_umls_syncer.egg-info/entry_points.txt
 src/py_neo_umls_syncer.egg-info/requires.txt
 src/py_neo_umls_syncer.egg-info/top_level.txt
+tests/test_cli.py
 tests/test_delta_strategy.py
 tests/test_downloader.py
 tests/test_full_import.py
