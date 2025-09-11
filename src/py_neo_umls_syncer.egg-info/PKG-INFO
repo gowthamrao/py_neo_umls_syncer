@@ -1,14 +1,15 @@
 Metadata-Version: 2.4
-Name: py-neo-umls-syncer
+Name: py_neo_umls_syncer
 Version: 0.1.0
 Summary: A production-ready Python package for creating and maintaining a UMLS Labeled Property Graph in Neo4j.
-Author-email: Jules <jules@example.com>
+Author-email: Gowtham Rao <rao@ohdsi.org>
 Classifier: Programming Language :: Python :: 3
-Classifier: License :: OSI Approved :: MIT License
+Classifier: License :: OSI Approved :: Apache Software License
 Classifier: Operating System :: OS Independent
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 License-File: LICENSE
+License-File: NOTICE
 Requires-Dist: pydantic[email]>=2.0
 Requires-Dist: pydantic-settings>=2.1.0
 Requires-Dist: typer[all]>=0.9.0
@@ -18,9 +19,12 @@ Requires-Dist: rich>=13.7.0
 Requires-Dist: pytest>=7.4.2
 Requires-Dist: testcontainers[neo4j]>=3.7.1
 Requires-Dist: pytest-cov>=4.1.0
+Requires-Dist: pytest-dependency>=0.5.1
+Requires-Dist: requests-mock>=1.9.3
 Dynamic: license-file
 
-# pyNeoUmlsSyncer
+<!-- Jules was here -->
+# py_neo_umls_syncer
 
 **A production-ready Python package for creating and maintaining a UMLS (Unified Medical Language System) Labeled Property Graph (LPG) in Neo4j (v5.x).**
 
@@ -150,8 +154,8 @@ To set up a development environment:
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-org/pyNeoUmlsSyncer.git
-cd pyNeoUmlsSyncer
+git clone https://github.com/your-org/py_neo_umls_syncer.git
+cd py_neo_umls_syncer
 
 # Create and activate a virtual environment
 python -m venv .venv

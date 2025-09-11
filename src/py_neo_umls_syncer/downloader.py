@@ -67,7 +67,7 @@ class UMLSDownloader:
         extracted_meta_path = release_version_dir / "META"
 
         if extracted_meta_path.exists() and extracted_meta_path.is_dir():
-            console.log(f"[green]UMLS release {release_name} already downloaded and extracted at {release_version_dir}. Skipping.[/green]")
+            console.log(f"[green]UMLS release {version} already downloaded and extracted at {release_version_dir}. Skipping.[/green]")
             return extracted_meta_path
 
         # Download

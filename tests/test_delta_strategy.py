@@ -38,7 +38,7 @@ def test_merged_cui_logic(neo4j_driver: Driver, test_csv_dir: Path):
     _create_file(merged_cui_file, [['C001', 'C002']]) # Old CUI | New CUI
 
     # 2. EXECUTE: Run the delta strategy for merging CUIs.
-    strategy = DeltaStrategy(driver=neo4j_driver, new_version="test", csv_dir=test_csv_dir)
+    strategy = DeltaStrategy(driver=neo4j_driver, new_version="test", import_dir=test_csv_dir)
     strategy.process_merged_cuis(merged_cui_file)
 
     # 3. ASSERT: Verify the graph is in the correct final state.
@@ -91,7 +91,7 @@ def test_stale_entity_deletion(neo4j_driver: Driver, test_csv_dir: Path):
         """)
 
     # 2. EXECUTE: Run the stale entity removal process for 'v2'.
-    strategy = DeltaStrategy(driver=neo4j_driver, new_version="v2", csv_dir=test_csv_dir)
+    strategy = DeltaStrategy(driver=neo4j_driver, new_version="v2", import_dir=test_csv_dir)
     strategy.remove_stale_entities()
 
     # 3. ASSERT: Verify the correct entities were deleted.
@@ -159,7 +159,7 @@ def test_apply_additions_and_updates(neo4j_driver: Driver, test_csv_dir: Path):
     )
 
     # 2. EXECUTE: Run the apply_additions_and_updates method.
-    strategy = DeltaStrategy(driver=neo4j_driver, new_version=version, csv_dir=test_csv_dir)
+    strategy = DeltaStrategy(driver=neo4j_driver, new_version=version, import_dir=test_csv_dir)
     strategy.apply_additions_and_updates()
 
     # 3. ASSERT: Verify that the data was loaded correctly.
