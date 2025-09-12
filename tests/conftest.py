@@ -39,34 +39,28 @@ def neo4j_container(test_import_dir: Path):
     A pytest fixture that starts and stops a Neo4j container for the test session.
     The container is configured with APOC plugins and a mounted import volume.
     """
-    # Manually download the APOC jar to ensure it's available
-    apoc_version = "5.22.0"
-    jar_url = f"https://github.com/neo4j/apoc/releases/download/{apoc_version}/apoc-{apoc_version}-core.jar"
-    jar_path = test_import_dir / f"apoc-{apoc_version}-core.jar"
+    # We use a specific version for reproducibility
+    NEO4J_VERSION = "5.22.0"
 
-    if not jar_path.exists():
-        with requests.get(jar_url, stream=True) as r:
-            r.raise_for_status()
-            with open(jar_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=8192):
-                    f.write(chunk)
+    container = Neo4jContainer(image=f"neo4j:{NEO4J_VERSION}")
+    # Let the official Neo4j image handle APOC download via this environment variable
+    container.with_env("NEO4J_PLUGINS", '["apoc"]')
 
-    container = Neo4jContainer(image=f"neo4j:{apoc_version}")
-    # container.with_env("NEO4J_PLUGINS", '["apoc"]')
+    # Standard configuration for APOC to allow file imports and exports
     container.with_env("NEO4J_apoc_export_file_enabled", "true")
     container.with_env("NEO4J_apoc_import_file_enabled", "true")
     container.with_env("NEO4J_apoc_import_file_use__neo4j__config", "true")
-    container.with_env("NEO4J_dbms_security_procedures_unrestricted", "apoc.*")
+    container.with_env("NEO4J_dbms_security_procedures_unrestricted", "apoc.*,algo.*")
+
+    # Set authentication and map the import directory
     container.with_env("NEO4J_AUTH", "neo4j/password")
     container.with_env("NEO4J_dbms_directories_import", "/import")
-    # Mount the static temp dir to the container's import directory
     container.with_volume_mapping(str(test_import_dir), "/import")
-    # Mount the downloaded APOC jar into the plugins directory
-    container.with_volume_mapping(str(jar_path), "/plugins/apoc.jar")
 
     with container as c:
+        # The original waiting logic, which is simple and less prone to race conditions.
         wait_for_logs(c, "Started.", 60)
-        time.sleep(10) # Crude way to wait for APOC to be fully ready
+        time.sleep(20) # Give APOC time to initialize fully after startup
         c.driver = c.get_driver()
         yield c
         c.driver.close()
@@ -75,17 +69,27 @@ def neo4j_container(test_import_dir: Path):
 def neo4j_driver(neo4j_container: Neo4jContainer):
     """
     Provides a driver to the test Neo4j container and cleans the database
-    before each test function.
+    after each test function. This is a more robust approach to ensuring
+    test isolation than cleaning before.
     """
     driver = neo4j_container.driver
-    # Clean database before each test
+    # Clean before the test runs to be safe
     with driver.session() as session:
         session.run("MATCH (n) DETACH DELETE n")
         # Also drop constraints to ensure a clean slate
         constraints = session.run("SHOW CONSTRAINTS YIELD name").data()
         for constraint in constraints:
             session.run(f"DROP CONSTRAINT {constraint['name']}")
+
     yield driver
+
+    # Clean up after the test has run
+    with driver.session() as session:
+        session.run("MATCH (n) DETACH DELETE n")
+        # Also drop constraints to ensure a clean slate
+        constraints = session.run("SHOW CONSTRAINTS YIELD name").data()
+        for constraint in constraints:
+            session.run(f"DROP CONSTRAINT {constraint['name']}")
 
 @pytest.fixture(scope="function")
 def test_csv_dir(test_import_dir: Path) -> Path:
