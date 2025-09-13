@@ -146,6 +146,11 @@ class TestPipeline:
             new_rel = session.run("MATCH (:Concept {cui:'C0000006'})-[r]->(:Concept {cui:'C0000001'}) RETURN r").single()
             assert new_rel is not None
 
+            # 7. Concept property is updated
+            updated_node = session.run("MATCH (c:Concept {cui: 'C0000002'}) RETURN c.preferred_name AS name").single()
+            assert updated_node is not None
+            assert updated_node["name"] == "Concept Two Updated"
+
     @pytest.mark.dependency(depends=["TestPipeline::test_incremental_sync"])
     def test_idempotency(self, neo4j_driver: Driver, setup_umls_data: dict):
         """

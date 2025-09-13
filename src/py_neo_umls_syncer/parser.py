@@ -32,7 +32,8 @@ def _process_mrconso_chunk(chunk_info: Tuple[str, int, int]) -> List[Tuple]:
         reader = csv.reader(chunk_content.splitlines(), delimiter='|', quotechar='\x00')
         for row in reader:
             try:
-                if len(row) <= SUPPRESS_I or len(row) <= SAB_I:
+                # Per RRF format, a trailing pipe means csv.reader gives 19 fields
+                if len(row) != 19:
                     continue
                 if row[SUPPRESS_I] in settings.suppression_handling or row[SAB_I] not in settings.sab_filter:
                     continue
@@ -62,7 +63,8 @@ def _process_mrrel_chunk(chunk_info: Tuple[str, int, int]) -> List[InterConceptR
         reader = csv.reader(chunk_content.splitlines(), delimiter='|', quotechar='\x00')
         for row in reader:
             try:
-                if len(row) <= SAB_REL_I:
+                # Per RRF format, a trailing pipe means csv.reader gives 17 fields
+                if len(row) != 17:
                     continue
                 # Filter based on SAB and ensure both concepts are in scope
                 if row[SAB_REL_I] not in settings.sab_filter:
