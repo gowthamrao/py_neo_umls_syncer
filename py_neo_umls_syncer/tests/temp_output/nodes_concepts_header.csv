@@ -1,2 +1,0 @@
-preferred_name,last_seen_version,cui,LABEL
-preferred_name:string,last_seen_version:string,cui:ID(cui),:LABEL
