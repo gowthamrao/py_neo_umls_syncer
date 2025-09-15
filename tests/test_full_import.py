@@ -56,7 +56,7 @@ def test_true_full_import(setup_umls_data_for_full_import: Path, tmp_path):
     data_volume = client.volumes.create(name=data_volume_name)
 
     try:
-        loader = Neo4jLoader()
+        loader = Neo4jLoader(driver=None)
         loader.run_bulk_import(meta_dir=setup_umls_data_for_full_import, version=VERSION)
 
         import_command = [

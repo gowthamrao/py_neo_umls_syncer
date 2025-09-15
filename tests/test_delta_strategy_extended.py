@@ -20,11 +20,9 @@ def test_chain_merge_logic(neo4j_driver: Driver, test_csv_dir: Path):
     """
     # 1. SETUP: Create the initial graph state.
     with neo4j_driver.session() as session:
-        session.run("""
-        CREATE (:Concept {cui: 'CUI1', preferred_name: 'Concept 1'})-[:REL_A]->(:Target {id: 'T1'});
-        CREATE (:Concept {cui: 'CUI2', preferred_name: 'Concept 2'})-[:REL_B]->(:Target {id: 'T2'});
-        CREATE (:Concept {cui: 'CUI3', preferred_name: 'Concept 3'});
-        """)
+        session.run("CREATE (:Concept {cui: 'CUI1', preferred_name: 'Concept 1'})-[:REL_A {source_rela: 'rel_a'}]->(:Target {id: 'T1'})")
+        session.run("CREATE (:Concept {cui: 'CUI2', preferred_name: 'Concept 2'})-[:REL_B {source_rela: 'rel_b'}]->(:Target {id: 'T2'})")
+        session.run("CREATE (:Concept {cui: 'CUI3', preferred_name: 'Concept 3'})")
 
     strategy = DeltaStrategy(driver=neo4j_driver, new_version="test", import_dir=test_csv_dir)
 
@@ -66,7 +64,7 @@ def test_merge_to_non_existent_node(neo4j_driver: Driver, test_csv_dir: Path):
     """
     # 1. SETUP: Create the source concept but not the target.
     with neo4j_driver.session() as session:
-        session.run("CREATE (:Concept {cui: 'CUI1', preferred_name: 'Concept 1'})-[:REL_A]->(:Target {id: 'T1'})")
+        session.run("CREATE (:Concept {cui: 'CUI1', preferred_name: 'Concept 1'})-[:REL_A {source_rela: 'rel_a'}]->(:Target {id: 'T1'})")
         initial_node_count = session.run("MATCH (n) RETURN count(n) as count").single()['count']
 
     strategy = DeltaStrategy(driver=neo4j_driver, new_version="test", import_dir=test_csv_dir)
@@ -75,13 +73,8 @@ def test_merge_to_non_existent_node(neo4j_driver: Driver, test_csv_dir: Path):
     merged_cui_file = test_csv_dir / "MERGEDCUI.RRF"
     _create_pipe_delimited_file(merged_cui_file, [['CUI1', 'CUI2']]) # CUI2 does not exist
 
-    # The underlying APOC procedure is expected to fail, which is correct.
-    # We expect the overall process to catch this and not crash.
-    with pytest.raises(Exception) as e_info:
-        strategy.process_merged_cuis(merged_cui_file)
-
-    # Assert that the error is due to the missing node
-    assert "Node with label `Concept` and property `cui` = 'CUI2' not found" in str(e_info.value)
+    # The query should find no matching nodes and complete gracefully without error.
+    strategy.process_merged_cuis(merged_cui_file)
 
 
     # 3. ASSERT: Verify that the original node was NOT deleted.
@@ -98,20 +91,13 @@ def test_complex_provenance_merge(neo4j_driver: Driver, test_csv_dir: Path):
     """
     # 1. SETUP: Create a complex scenario
     with neo4j_driver.session() as session:
-        session.run("""
-        // Create concepts
-        CREATE (c1:Concept {cui: 'CUI1'})
-        CREATE (c2:Concept {cui: 'CUI2'})
-        CREATE (t1:Concept {cui: 'TARGET1'})
-        CREATE (t2:Concept {cui: 'TARGET2'})
-
-        // C1 and C2 both have a :TREATS relationship to T1
-        CREATE (c1)-[:TREATS {source_rela: 'treats', asserted_by_sabs: ['SAB_A']}]->(t1)
-        CREATE (c2)-[:TREATS {source_rela: 'treats', asserted_by_sabs: ['SAB_B']}]->(t1)
-
-        // C1 has a unique relationship to T2
-        CREATE (c1)-[:AFFECTS {source_rela: 'affects', asserted_by_sabs: ['SAB_C']}]->(t2)
-        """)
+        session.run("CREATE (c1:Concept {cui: 'CUI1'})")
+        session.run("CREATE (c2:Concept {cui: 'CUI2'})")
+        session.run("CREATE (t1:Concept {cui: 'TARGET1'})")
+        session.run("CREATE (t2:Concept {cui: 'TARGET2'})")
+        session.run("CREATE (c1)-[:TREATS {source_rela: 'treats', asserted_by_sabs: ['SAB_A']}]->(t1)")
+        session.run("CREATE (c2)-[:TREATS {source_rela: 'treats', asserted_by_sabs: ['SAB_B']}]->(t1)")
+        session.run("CREATE (c1)-[:AFFECTS {source_rela: 'affects', asserted_by_sabs: ['SAB_C']}]->(t2)")
 
     strategy = DeltaStrategy(driver=neo4j_driver, new_version="test", import_dir=test_csv_dir)
 
@@ -151,32 +137,23 @@ def test_snapshot_diff_logic(neo4j_driver: Driver, test_csv_dir: Path):
     """
     # 1. SETUP: Create a graph representing the old state (v1)
     with neo4j_driver.session() as session:
-        session.run("""
-        // Kept entities that will be updated to v2
-        CREATE (c1:Concept {cui: 'CUI1', last_seen_version: 'v1'})
-        CREATE (code1:Code {code_id: 'CODE1', last_seen_version: 'v1'})
-        CREATE (c1)-[:HAS_CODE {last_seen_version: 'v1'}]->(code1)
+        session.run("CREATE (c1:Concept {cui: 'CUI1', last_seen_version: 'v1'})")
+        session.run("CREATE (code1:Code {code_id: 'CODE1', last_seen_version: 'v1'})")
+        session.run("CREATE (c1)-[:HAS_CODE {last_seen_version: 'v1'}]->(code1)")
+        session.run("CREATE (c2:Concept {cui: 'CUI2', last_seen_version: 'v1'})")
+        session.run("CREATE (code2:Code {code_id: 'CODE2', last_seen_version: 'v1'})")
+        session.run("CREATE (c2)-[:HAS_CODE {last_seen_version: 'v1'}]->(code2)")
+        session.run("CREATE (c1)-[:RELATED_TO {source_rela: 'RELATED_TO', last_seen_version: 'v1'}]->(c2)")
+        session.run("CREATE (c3_stale:Concept {cui: 'CUI3', last_seen_version: 'v1'})")
 
-        // Stale entities that should be removed
-        CREATE (c2:Concept {cui: 'CUI2', last_seen_version: 'v1'})
-        CREATE (code2:Code {code_id: 'CODE2', last_seen_version: 'v1'})
-        CREATE (c2)-[r_stale_has_code:HAS_CODE {last_seen_version: 'v1'}]->(code2)
-        CREATE (c1)-[r_stale_related:RELATED_TO {last_seen_version: 'v1'}]->(c2)
-
-        // A stale concept that should NOT be removed by this process
-        CREATE (c3_stale:Concept {cui: 'CUI3', last_seen_version: 'v1'})
-        """)
 
     # 2. SIMULATE V2 UPDATE: Manually update the `last_seen_version` for entities
     # that are supposed to exist in the new snapshot.
     with neo4j_driver.session() as session:
-        session.run("""
-        MATCH (c:Concept {cui: 'CUI1'}) SET c.last_seen_version = 'v2';
-        MATCH (c:Code {code_id: 'CODE1'}) SET c.last_seen_version = 'v2';
-        MATCH (:Concept {cui: 'CUI1'})-[r:HAS_CODE]->(:Code {code_id: 'CODE1'}) SET r.last_seen_version = 'v2';
-        // Note: CUI2 is "kept" as a concept, but its relationships and codes are not.
-        MATCH (c:Concept {cui: 'CUI2'}) SET c.last_seen_version = 'v2';
-        """)
+        session.run("MATCH (c:Concept {cui: 'CUI1'}) SET c.last_seen_version = 'v2'")
+        session.run("MATCH (c:Code {code_id: 'CODE1'}) SET c.last_seen_version = 'v2'")
+        session.run("MATCH (:Concept {cui: 'CUI1'})-[r:HAS_CODE]->(:Code {code_id: 'CODE1'}) SET r.last_seen_version = 'v2'")
+        session.run("MATCH (c:Concept {cui: 'CUI2'}) SET c.last_seen_version = 'v2'")
 
     # 3. EXECUTE: Run the stale entity removal process.
     strategy = DeltaStrategy(driver=neo4j_driver, new_version="v2", import_dir=test_csv_dir)

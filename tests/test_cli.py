@@ -49,6 +49,7 @@ def mock_v2_zip_content() -> bytes:
 @pytest.fixture(scope="function")
 def setup_v1_database(
     neo4j_driver: Driver,
+    test_csv_dir: Path,
     tmp_path: Path,
     monkeypatch,
     requests_mock,
@@ -59,9 +60,8 @@ def setup_v1_database(
     This prepares the ground for testing the incremental sync.
     """
     VERSION = "2025AA"
-    import_dir = tmp_path / "import"
-    import_dir.mkdir()
-    download_dir = tmp_path / "download"
+    import_dir = test_csv_dir # Use the mounted directory for imports
+    download_dir = tmp_path / "download" # Use a regular temp dir for downloads
     download_dir.mkdir()
     monkeypatch.setattr(settings, "neo4j_import_dir", str(import_dir))
     monkeypatch.setattr(settings, "download_dir", str(download_dir))
@@ -93,6 +93,7 @@ def setup_v1_database(
 
 def test_full_import_cli(
     neo4j_driver: Driver,
+    test_csv_dir: Path,
     tmp_path: Path,
     monkeypatch,
     requests_mock,
@@ -103,8 +104,7 @@ def test_full_import_cli(
     """
     VERSION = "2025AA"
     # 1. Setup environment variables
-    import_dir = tmp_path / "import"
-    import_dir.mkdir()
+    import_dir = test_csv_dir
     download_dir = tmp_path / "download"
     download_dir.mkdir()
     monkeypatch.setattr(settings, "neo4j_import_dir", str(import_dir))
@@ -150,10 +150,12 @@ def test_full_import_cli(
         meta_version = session.run("MATCH (m:UMLS_Meta) RETURN m.version AS version").single()["version"]
         assert meta_version == VERSION
         node_count = session.run("MATCH (n) RETURN count(n) AS count").single()["count"]
-        assert node_count == 10  # 5 concepts + 5 codes + meta
+        assert node_count == 11  # 5 concepts + 5 codes + 1 meta
         rel_count = session.run("MATCH ()-[r]->() RETURN count(r) AS count").single()["count"]
-        assert rel_count == 8  # 5 has_code + 3 inter_concept
+        assert rel_count == 5  # 5 has_code, 0 inter_concept in mock data
 
+
+from neo4j import GraphDatabase
 
 def test_incremental_sync_cli(
     neo4j_driver: Driver,
@@ -162,6 +164,10 @@ def test_incremental_sync_cli(
     setup_v1_database, # This fixture sets up the DB with V1 data
     mock_v2_zip_content: bytes
 ):
+    # This is the key to fixing the CLI tests. We need to ensure that when the
+    # CLI code calls GraphDatabase.driver(), it receives the test driver from
+    # the container, not a new one pointing to a default (and wrong) address.
+    monkeypatch.setattr(GraphDatabase, "driver", lambda *args, **kwargs: neo4j_driver)
     """
     Tests the incremental-sync CLI command end-to-end.
     """
@@ -187,13 +193,13 @@ def test_incremental_sync_cli(
     print(result.stdout)
     # 3. Assert the output
     assert result.exit_code == 0
-    assert "Starting incremental sync to version 2025AB" in result.stdout
-    assert "Step 1: Handling Deletions" in result.stdout
-    assert "Step 2: Handling Merges" in result.stdout
-    assert "Step 3: Applying Additions and Updates" in result.stdout
-    assert "Step 4: Pruning Stale Data" in result.stdout
-    assert "Step 5: Updating Metadata" in result.stdout
-    assert "Incremental sync to version 2025AB complete." in result.stdout
+    assert "Starting Incremental Sync to Version: 2025AB" in result.stdout
+    assert "Processing deleted CUIs..." in result.stdout
+    assert "Processing merged CUIs..." in result.stdout
+    assert "Applying additions and updates" in result.stdout
+    assert "Removing stale entities" in result.stdout
+    assert "Updating metadata version" in result.stdout
+    assert "Incremental sync to version 2025AB completed successfully!" in result.stdout
 
     # 4. Verify the database state
     with neo4j_driver.session() as session:
@@ -227,8 +233,9 @@ def test_incremental_sync_cli(
         assert new_rel is not None
 
 def test_incremental_sync_no_meta_node(
-    neo4j_driver: Driver, tmp_path: Path, monkeypatch, requests_mock, mock_v2_zip_content: bytes
+    neo4j_driver: Driver, test_csv_dir: Path, tmp_path: Path, monkeypatch, requests_mock, mock_v2_zip_content: bytes
 ):
+    monkeypatch.setattr(GraphDatabase, "driver", lambda *args, **kwargs: neo4j_driver)
     """
     Tests that incremental-sync fails gracefully if the meta node is not present.
     """
@@ -237,7 +244,7 @@ def test_incremental_sync_no_meta_node(
     download_dir = tmp_path / "download"
     download_dir.mkdir()
     monkeypatch.setattr(settings, "download_dir", str(download_dir))
-    monkeypatch.setattr(settings, "neo4j_import_dir", str(tmp_path / "import"))
+    monkeypatch.setattr(settings, "neo4j_import_dir", str(test_csv_dir))
 
 
     # 2. Mock V2 UMLS API responses so the command doesn't fail on download

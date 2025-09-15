@@ -57,6 +57,8 @@ def full_import(
         raise typer.Exit(code=1)
 
 
+from neo4j import GraphDatabase, Driver
+
 @app.command(name="init-meta", help="Initialize metadata after a successful bulk import.")
 def init_meta(
     version: str = typer.Option(
@@ -72,8 +74,10 @@ def init_meta(
     2. Creates the :UMLS_Meta node to lock in the current version.
     """
     console.print(Panel(f"[bold cyan]Initializing metadata for version: {version}[/bold cyan]", border_style="cyan"))
-    loader = Neo4jLoader()
+    driver = None
     try:
+        driver = GraphDatabase.driver(settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
+        loader = Neo4jLoader(driver=driver)
         loader.update_meta_node_after_bulk(version)
         console.print(Panel(
             f"[bold green]Successfully initialized metadata for version {version}. The database is now ready for incremental syncs.[/bold green]",
@@ -84,7 +88,8 @@ def init_meta(
         console.print(Panel(f"[bold red]Failed to initialize metadata: {e}", title="[bold red]Error[/bold red]"))
         raise typer.Exit(code=1)
     finally:
-        loader.close()
+        if driver:
+            driver.close()
 
 @app.command(name="incremental-sync", help="Synchronize an existing DB with a new UMLS version.")
 def incremental_sync(
@@ -105,19 +110,32 @@ def incremental_sync(
     6. Updates the graph version.
     """
     console.print(Panel(f"[bold cyan]Starting Incremental Sync to Version: {version}[/bold cyan]", border_style="cyan"))
-
+    driver = None
     try:
         # Step 1: Download UMLS data
         meta_dir = download_umls_if_needed(version)
 
         # Step 2: Orchestrate the incremental sync
-        loader = Neo4jLoader()
+        driver = GraphDatabase.driver(settings.neo4j_uri, auth=(settings.neo4j_user, settings.neo4j_password))
+
+        # Pre-flight check: ensure the database has been initialized
+        with driver.session(database=settings.neo4j_database) as session:
+            meta_node = session.run("MATCH (m:UMLS_Meta) RETURN m").single()
+            if not meta_node:
+                console.print("[bold red]Error: UMLS_Meta node not found.[/bold red]")
+                console.print("Please run `full-import` and `init-meta` first.")
+                raise typer.Exit(code=1)
+
+        loader = Neo4jLoader(driver=driver)
         loader.run_incremental_sync(meta_dir, version)
 
     except Exception as e:
         console.print_exception()
         console.print(Panel(f"[bold red]An error occurred during the incremental sync process: {e}", title="[bold red]Error[/bold red]"))
         raise typer.Exit(code=1)
+    finally:
+        if driver:
+            driver.close()
 
 if __name__ == "__main__":
     app()

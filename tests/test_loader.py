@@ -13,7 +13,7 @@ def test_run_bulk_import(mock_csv_transformer, mock_rrf_parser, tmp_path):
     and generating the neo4j-admin command.
     """
     # Arrange
-    loader = Neo4jLoader()
+    loader = Neo4jLoader(driver=None) # run_bulk_import does not need a driver
     meta_dir = tmp_path / "META"
     meta_dir.mkdir()
     version = "2023AA"
@@ -37,39 +37,35 @@ def test_run_bulk_import(mock_csv_transformer, mock_rrf_parser, tmp_path):
     )
 
 @patch('py_neo_umls_syncer.loader.DeltaStrategy')
-@patch('py_neo_umls_syncer.loader.Neo4jLoader.close')
-def test_update_meta_node_after_bulk(mock_close, mock_delta_strategy):
+def test_update_meta_node_after_bulk(mock_delta_strategy):
     """
     Test that update_meta_node_after_bulk correctly calls the DeltaStrategy.
     """
     # Arrange
-    loader = Neo4jLoader()
-    version = "2023AA"
-
-    mock_strategy_instance = mock_delta_strategy.return_value
     mock_driver = MagicMock()
+    loader = Neo4jLoader(driver=mock_driver)
+    version = "2023AA"
+    mock_strategy_instance = mock_delta_strategy.return_value
 
-    with patch.object(loader, '_get_driver', return_value=mock_driver):
-        # Act
-        loader.update_meta_node_after_bulk(version)
+    # Act
+    loader.update_meta_node_after_bulk(version)
 
     # Assert
-    mock_delta_strategy.assert_called_once()
+    mock_delta_strategy.assert_called_once_with(mock_driver, version, Path(settings.neo4j_import_dir))
     mock_strategy_instance.ensure_constraints.assert_called_once()
     mock_strategy_instance.update_meta_node.assert_called_once()
-    mock_close.assert_called_once()
 
 
 @patch('py_neo_umls_syncer.loader.RRFParser')
 @patch('py_neo_umls_syncer.loader.CSVTransformer')
 @patch('py_neo_umls_syncer.loader.DeltaStrategy')
-@patch('py_neo_umls_syncer.loader.Neo4jLoader.close')
-def test_run_incremental_sync(mock_close, mock_delta_strategy, mock_csv_transformer, mock_rrf_parser, tmp_path):
+def test_run_incremental_sync(mock_delta_strategy, mock_csv_transformer, mock_rrf_parser, tmp_path):
     """
     Test that run_incremental_sync correctly orchestrates the sync process.
     """
     # Arrange
-    loader = Neo4jLoader()
+    mock_driver = MagicMock()
+    loader = Neo4jLoader(driver=mock_driver)
     meta_dir = tmp_path / "META"
     meta_dir.mkdir()
     version = "2023AB"
@@ -78,13 +74,11 @@ def test_run_incremental_sync(mock_close, mock_delta_strategy, mock_csv_transfor
     mock_parser_instance.parse_files.return_value = ([], [], [], [], {})
 
     mock_strategy_instance = mock_delta_strategy.return_value
-    mock_driver = MagicMock()
     (meta_dir / "DELETEDCUI.RRF").touch()
     (meta_dir / "MERGEDCUI.RRF").touch()
 
-    with patch.object(loader, '_get_driver', return_value=mock_driver):
-        # Act
-        loader.run_incremental_sync(meta_dir, version)
+    # Act
+    loader.run_incremental_sync(meta_dir, version)
 
     # Assert
     mock_delta_strategy.assert_called_once()
@@ -95,4 +89,3 @@ def test_run_incremental_sync(mock_close, mock_delta_strategy, mock_csv_transfor
     mock_strategy_instance.apply_additions_and_updates.assert_called_once()
     mock_strategy_instance.remove_stale_entities.assert_called_once()
     mock_strategy_instance.update_meta_node.assert_called_once()
-    mock_close.assert_called_once()
