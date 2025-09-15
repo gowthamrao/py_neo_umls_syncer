@@ -129,6 +129,7 @@ class RRFParser:
     def _reduce_mrconso_results(self, all_term_info: List[Tuple]) -> Tuple[Dict[str, Concept], List[Code], List[ConceptToCodeRelationship]]:
         """
         Reduces the mapped MRCONSO data to produce Concepts (with preferred names) and Codes.
+        This function ensures that the returned lists of codes and relationships contain only unique items.
         """
         console.log("Reducing MRCONSO data to select preferred names...")
         cui_terms = defaultdict(list)
@@ -136,8 +137,9 @@ class RRFParser:
             cui_terms[cui].append(term_info)
 
         concepts = {}
-        codes = []
-        concept_to_code_rels = []
+        unique_codes = {}  # Using a dict as an ordered set: {code_id: Code}
+        unique_concept_to_code_rels = set()  # Using a set for relation tuples: {(cui, code_id)}
+
 
         sab_priority_map = {sab: i for i, sab in enumerate(settings.sab_priority)}
 
@@ -145,20 +147,28 @@ class RRFParser:
             # Generate all code nodes and relationships
             for term in terms:
                 code_id = f"{term['sab']}:{term['code']}"
-                codes.append(Code(code_id=code_id, sab=term['sab'], name=term['name']))
-                concept_to_code_rels.append(ConceptToCodeRelationship(cui=cui, code_id=code_id))
+                # Add code if not seen before
+                if code_id not in unique_codes:
+                    unique_codes[code_id] = Code(code_id=code_id, sab=term['sab'], name=term['name'])
+                # Add relationship if not seen before
+                rel_tuple = (cui, code_id)
+                unique_concept_to_code_rels.add(rel_tuple)
 
             # Determine preferred name
             terms.sort(key=lambda t: (
-                sab_priority_map.get(t['sab'], 999), # Lower is better
-                t['ts'] != 'P', # P is preferred
-                t['stt'] != 'PF', # PF is preferred
-                t['ispref'] != 'Y' # Y is preferred
+                sab_priority_map.get(t['sab'], 999),  # Lower is better
+                t['ts'] != 'P',  # P is preferred
+                t['stt'] != 'PF',  # PF is preferred
+                t['ispref'] != 'Y'  # Y is preferred
             ))
             preferred_term = terms[0]
             concepts[cui] = Concept(cui=cui, preferred_name=preferred_term['name'])
 
-        console.log(f"Reduced to {len(concepts)} concepts and {len(codes)} codes.")
+        # Convert the unique collections to lists for the return type
+        codes = list(unique_codes.values())
+        concept_to_code_rels = [ConceptToCodeRelationship(cui=cui, code_id=code_id) for cui, code_id in unique_concept_to_code_rels]
+
+        console.log(f"Reduced to {len(concepts)} concepts and {len(codes)} unique codes.")
         return concepts, codes, concept_to_code_rels
 
     def parse_files(self) -> Tuple[Dict[str, Concept], List[Code], List[ConceptToCodeRelationship], List[InterConceptRelationship], Dict[str, List[SemanticType]]]:

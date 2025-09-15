@@ -59,145 +59,148 @@ class DeltaStrategy:
         console.log(f"Submitted deletion task for {len(cuis_to_delete)} CUIs.")
 
     def process_merged_cuis(self, merged_cui_file: Path):
-        """Processes MERGEDCUI.RRF to merge concepts."""
+        """Processes MERGEDCUI.RRF to merge concepts in a batched, idempotent manner."""
         if not merged_cui_file.exists():
             console.log("[yellow]MERGEDCUI.RRF not found. Skipping merges.[/yellow]")
             return
 
-        console.log("Processing merged CUIs...")
-        # MERGEDCUI.RRF contains CUI_OLD|CUI_NEW
-        merges = [row for row in csv.reader(merged_cui_file.open('r'), delimiter='|')]
+        console.log("Processing merged CUIs using a batched approach...")
+        merges = [{"old_cui": row[0], "new_cui": row[1]} for row in csv.reader(merged_cui_file.open('r'), delimiter='|') if row]
 
-        # This process is broken down into sequential queries to avoid transactional
-        # complexities and ensure each step is handled atomically.
-        for old_cui, new_cui in merges:
-            # Check if the target node exists before attempting a merge
-            with self.driver.session(database=settings.neo4j_database) as session:
-                result = session.run("MATCH (c:Concept {cui: $cui}) RETURN c", cui=new_cui)
-                if not result.single():
-                    console.log(f"[bold yellow]Skipping merge for {old_cui} -> {new_cui}: Target CUI not found.[/bold yellow]")
-                    continue
+        # This is the literal query string that will be executed for each batch.
+        # It handles all the logic for migrating relationships and provenance.
+        inner_query = """
+        CALL {
+            WITH merge_op
+            MATCH (old:Concept {cui: merge_op.old_cui}), (new:Concept {cui: merge_op.new_cui})
 
-            params = {"old_cui": old_cui, "new_cui": new_cui, "version": self.new_version}
+            // Migrate :HAS_CODE relationships
+            WITH old, new
+            OPTIONAL MATCH (old)-[r:HAS_CODE]->(c:Code)
+            FOREACH (ignoreMe IN CASE WHEN r IS NOT NULL THEN [1] ELSE [] END | MERGE (new)-[:HAS_CODE]->(c))
 
-            # Step 1: Migrate outgoing relationships
-            outgoing_rels_query = """
-            MATCH (old:Concept {cui: $old_cui}), (new:Concept {cui: $new_cui})
-            MATCH (old)-[r]->(target)
-            WHERE elementId(target) <> elementId(new) AND type(r) <> 'HAS_CODE'
-            WITH new, r, target
-            CALL apoc.merge.relationship(new, type(r), {source_rela: r.source_rela}, {}, target) YIELD rel
-            SET rel.asserted_by_sabs = apoc.coll.union(coalesce(rel.asserted_by_sabs, []), r.asserted_by_sabs),
-                rel.last_seen_version = $version
-            """
-            self._run_query(outgoing_rels_query, params)
+            // Migrate outgoing inter-concept relationships
+            WITH old, new, [(old)-[r]->(target:Concept) WHERE NOT type(r)='HAS_CODE' | {rel: r, target: target}] as outgoing
+            FOREACH (item IN outgoing |
+                MERGE (new)-[new_r:`${apoc.relation.type(item.rel)}` {source_rela: item.rel.source_rela}]->(item.target)
+                ON CREATE SET new_r.asserted_by_sabs = item.rel.asserted_by_sabs, new_r.last_seen_version = $version
+                ON MATCH SET new_r.asserted_by_sabs = apoc.coll.union(new_r.asserted_by_sabs, item.rel.asserted_by_sabs), new_r.last_seen_version = $version
+            )
 
-            # Step 2: Migrate incoming relationships
-            incoming_rels_query = """
-            MATCH (old:Concept {cui: $old_cui}), (new:Concept {cui: $new_cui})
-            MATCH (source)-[r]->(old)
-            WHERE elementId(source) <> elementId(new) AND type(r) <> 'HAS_CODE'
-            WITH source, new, r
-            CALL apoc.merge.relationship(source, type(r), {source_rela: r.source_rela}, {}, new) YIELD rel
-            SET rel.asserted_by_sabs = apoc.coll.union(coalesce(rel.asserted_by_sabs, []), r.asserted_by_sabs),
-                rel.last_seen_version = $version
-            """
-            self._run_query(incoming_rels_query, params)
+            // Migrate incoming inter-concept relationships
+            WITH old, new, [(source:Concept)-[r]->(old) WHERE NOT type(r)='HAS_CODE' | {rel: r, source: source}] as incoming
+            FOREACH (item IN incoming |
+                MERGE (item.source)-[new_r:`${apoc.relation.type(item.rel)}` {source_rela: item.rel.source_rela}]->(new)
+                ON CREATE SET new_r.asserted_by_sabs = item.rel.asserted_by_sabs, new_r.last_seen_version = $version
+                ON MATCH SET new_r.asserted_by_sabs = apoc.coll.union(new_r.asserted_by_sabs, item.rel.asserted_by_sabs), new_r.last_seen_version = $version
+            )
 
-            # Step 3: Migrate codes
-            codes_query = """
-            MATCH (old:Concept {cui: $old_cui}), (new:Concept {cui: $new_cui})
-            MATCH (old)-[r:HAS_CODE]->(c:Code)
-            MERGE (new)-[new_r:HAS_CODE]->(c)
-            SET new_r.last_seen_version = $version
-            """
-            self._run_query(codes_query, params)
+            // Finally, detach and delete the old concept
+            WITH old
+            DETACH DELETE old
+        }
+        """
 
-            # Step 4: Delete the old concept
-            delete_query = "MATCH (c:Concept {cui: $old_cui}) DETACH DELETE c"
-            self._run_query(delete_query, params)
-
-        console.log(f"Processed {len(merges)} CUI merge operations.")
-
-    def _read_csv_to_list(self, filename: str) -> list[dict]:
-        """Reads a CSV file from the import directory into a list of dicts."""
-        file_path = self.import_dir / filename
-        if not file_path.exists():
-            return []
-        with file_path.open('r', encoding='utf-8') as f:
-            # The transformer uses csv.DictWriter with standard quoting, so we need to handle the quotes here
-            reader = csv.DictReader(f)
-            return list(reader)
+        # The outer query passes the list of merges and other params correctly.
+        # The params from the outer _run_query call are available to both the
+        # first and second arguments of apoc.periodic.iterate.
+        outer_query = f"""
+        CALL apoc.periodic.iterate(
+          "UNWIND $merges AS merge_op RETURN merge_op",
+          "{inner_query.replace('"', '\\"')}",
+          {{batchSize: 100, parallel: false, params: {{version: $version}} }}
+        )
+        """
+        self._run_query(outer_query, params={"merges": merges, "version": self.new_version})
+        console.log(f"Submitted batch merge task for {len(merges)} CUIs.")
 
     def apply_additions_and_updates(self):
-        """Applies all additions and updates from the new snapshot using a single transaction per file."""
+        """
+        Applies all additions and updates from the new snapshot using `apoc.load.csv`
+        for a scalable, low-memory, batched import process.
+        """
         console.log("Applying additions and updates from new snapshot CSVs...")
-
-        # NOTE: We are abandoning apoc.periodic.iterate for this method as it proves
-        # unreliable with complex inner queries involving MERGE and procedure calls.
-        # A simple UNWIND is transactionally safer for this logic, although it may
-        # be less performant on extremely large files. Given the context of incremental
-        # updates, this is a reasonable trade-off for correctness and reliability.
+        base_params = {"version": self.new_version, "batchSize": settings.apoc_batch_size}
 
         # 1. Concepts
-        concepts_data = self._read_csv_to_list("nodes_concepts.csv")
-        if concepts_data:
-            concepts_query = """
-            UNWIND $rows AS row
-            MERGE (c:Concept {cui: row["cui:ID(Concept-ID)"]})
-            SET c += {preferred_name: row["preferred_name:string"], last_seen_version: $version}
-            WITH c, row[":LABEL"] as labels
-            CALL apoc.create.setLabels(c, apoc.text.split(labels, ";")) YIELD node
-            RETURN count(node)
+        concepts_csv_path = "nodes_concepts.csv"
+        if (self.import_dir / concepts_csv_path).exists():
+            console.log(f"Loading {concepts_csv_path}...")
+            query = f"""
+            CALL apoc.periodic.iterate(
+              'CALL apoc.load.csv("file:///{concepts_csv_path}", {{header:true}}) YIELD map AS row RETURN row',
+              '
+                MERGE (c:Concept {{cui: row["cui:ID(Concept-ID)"]}})
+                SET c += {{preferred_name: row["preferred_name:string"], last_seen_version: $version}}
+                WITH c, row[":LABEL"] as labels
+                CALL apoc.create.setLabels(c, apoc.text.split(labels, ";")) YIELD node
+              ',
+              {{batchSize: $batchSize, parallel: false, params: {{version: $version}}}}
+            )
             """
-            self._run_query(concepts_query, params={"rows": concepts_data, "version": self.new_version})
+            self._run_query(query, params=base_params)
 
         # 2. Codes
-        codes_data = self._read_csv_to_list("nodes_codes.csv")
-        if codes_data:
-            codes_query = """
-            UNWIND $rows AS row
-            MERGE (c:Code {code_id: row["code_id:ID(Code-ID)"]})
-            SET c += {sab: row["sab:string"], name: row["name:string"], last_seen_version: $version}
-            RETURN count(c)
+        codes_csv_path = "nodes_codes.csv"
+        if (self.import_dir / codes_csv_path).exists():
+            console.log(f"Loading {codes_csv_path}...")
+            query = f"""
+            CALL apoc.periodic.iterate(
+              'CALL apoc.load.csv("file:///{codes_csv_path}", {{header:true}}) YIELD map AS row RETURN row',
+              '
+                MERGE (c:Code {{code_id: row["code_id:ID(Code-ID)"]}})
+                SET c += {{sab: row["sab:string"], name: row["name:string"], last_seen_version: $version}}
+              ',
+              {{batchSize: $batchSize, parallel: false, params: {{version: $version}}}}
+            )
             """
-            self._run_query(codes_query, params={"rows": codes_data, "version": self.new_version})
+            self._run_query(query, params=base_params)
 
         # 3. HAS_CODE Relationships
-        has_code_data = self._read_csv_to_list("rels_has_code.csv")
-        if has_code_data:
-            has_code_rel_query = """
-            UNWIND $rows AS row
-            MATCH (start:Concept {cui: row[":START_ID(Concept-ID)"]})
-            MATCH (end:Code {code_id: row[":END_ID(Code-ID)"]})
-            MERGE (start)-[r:HAS_CODE]->(end)
-            SET r.last_seen_version = $version
-            RETURN count(r)
+        has_code_csv_path = "rels_has_code.csv"
+        if (self.import_dir / has_code_csv_path).exists():
+            console.log(f"Loading {has_code_csv_path}...")
+            query = f"""
+            CALL apoc.periodic.iterate(
+              'CALL apoc.load.csv("file:///{has_code_csv_path}", {{header:true}}) YIELD map AS row RETURN row',
+              '
+                MATCH (start:Concept {{cui: row[":START_ID(Concept-ID)"]}})
+                MATCH (end:Code {{code_id: row[":END_ID(Code-ID)"]}})
+                MERGE (start)-[r:HAS_CODE]->(end)
+                SET r.last_seen_version = $version
+              ',
+              {{batchSize: $batchSize, parallel: false, params: {{version: $version}}}}
+            )
             """
-            self._run_query(has_code_rel_query, params={"rows": has_code_data, "version": self.new_version})
+            self._run_query(query, params=base_params)
 
         # 4. Inter-Concept Relationships
-        inter_concept_data = self._read_csv_to_list("rels_inter_concept.csv")
-        if inter_concept_data:
-            inter_concept_rel_query = """
-            UNWIND $rows AS row
-            MATCH (start:Concept {cui: row[":START_ID(Concept-ID)"]})
-            MATCH (end:Concept {cui: row[":END_ID(Concept-ID)"]})
-            CALL apoc.merge.relationship(
-                start,
-                row[":TYPE"],
-                { source_rela: row["source_rela:string"] },
-                {},
-                end
-            ) YIELD rel
-            SET rel.last_seen_version = $version,
-                rel.asserted_by_sabs = apoc.coll.union(
-                    coalesce(rel.asserted_by_sabs, []),
-                    apoc.text.split(row["asserted_by_sabs:string[]"], ";")
-                )
-            RETURN count(rel)
+        inter_concept_csv_path = "rels_inter_concept.csv"
+        if (self.import_dir / inter_concept_csv_path).exists():
+            console.log(f"Loading {inter_concept_csv_path}...")
+            query = f"""
+            CALL apoc.periodic.iterate(
+              'CALL apoc.load.csv("file:///{inter_concept_csv_path}", {{header:true}}) YIELD map AS row RETURN row',
+              '
+                MATCH (start:Concept {{cui: row[":START_ID(Concept-ID)"]}})
+                MATCH (end:Concept {{cui: row[":END_ID(Concept-ID)"]}})
+                CALL apoc.merge.relationship(
+                    start,
+                    row[":TYPE"],
+                    {{ source_rela: row["source_rela:string"] }},
+                    {{}},
+                    end
+                ) YIELD rel
+                SET rel.last_seen_version = $version,
+                    rel.asserted_by_sabs = apoc.coll.union(
+                        coalesce(rel.asserted_by_sabs, []),
+                        apoc.text.split(row["asserted_by_sabs:string[]"], ";")
+                    )
+              ',
+              {{batchSize: $batchSize, parallel: false, params: {{version: $version}}}}
+            )
             """
-            self._run_query(inter_concept_rel_query, params={"rows": inter_concept_data, "version": self.new_version})
+            self._run_query(query, params=base_params)
 
         console.log("[green]Finished applying additions and updates.[/green]")
 
