@@ -50,7 +50,7 @@ def test_incremental_sync_missing_change_files(neo4j_driver: Driver, setup_missi
     """
     # Step 1: Full import of V1
     v1_version = "2026AA"
-    loader_v1 = Neo4jLoader()
+    loader_v1 = Neo4jLoader(driver=neo4j_driver)
     # Simulate neo4j-admin import by directly running the Cypher
     strategy_v1 = DeltaStrategy(neo4j_driver, v1_version, Path(settings.neo4j_import_dir))
     loader_v1.run_bulk_import(meta_dir=setup_missing_change_files_data["v1"], version=v1_version)
@@ -64,7 +64,7 @@ def test_incremental_sync_missing_change_files(neo4j_driver: Driver, setup_missi
 
     # Step 2: Incremental sync of V2
     v2_version = "2026AB"
-    loader_v2 = Neo4jLoader()
+    loader_v2 = Neo4jLoader(driver=neo4j_driver)
     loader_v2.run_incremental_sync(meta_dir=setup_missing_change_files_data["v2"], version=v2_version)
 
     # Step 3: Verification

@@ -13,35 +13,21 @@ from .delta_strategy import DeltaStrategy
 
 console = Console()
 
+from typing import Optional
+
 class Neo4jLoader:
     """
     Orchestrates the loading of UMLS data into Neo4j, supporting both
     initial bulk import and incremental synchronization.
     """
 
-    def __init__(self, driver: Driver = None):
+    def __init__(self, driver: Optional[Driver] = None):
         from .downloader import UMLSDownloader
         self._driver = driver
-        self._should_close_driver = driver is None
         self.downloader = UMLSDownloader(
             api_key=settings.umls_api_key,
             download_dir=settings.download_dir
         )
-
-    def _get_driver(self) -> Driver:
-        """Initializes and returns a Neo4j driver instance if not provided."""
-        if self._driver is None:
-             self._driver = GraphDatabase.driver(
-                settings.neo4j_uri,
-                auth=(settings.neo4j_user, settings.neo4j_password)
-            )
-        return self._driver
-
-    def close(self):
-        """Closes the Neo4j driver connection if it was created by this instance."""
-        if self._driver and self._should_close_driver and not self._driver.closed():
-            self._driver.close()
-            console.log("Owned Neo4j driver connection closed.")
 
     def run_bulk_import(self, meta_dir: Path, version: str):
         """
@@ -94,21 +80,20 @@ neo4j-admin database import full \\
         Connects to the database and creates the UMLS_Meta node.
         This is intended to be called after a bulk import is complete and the DB is running.
         """
+        if not self._driver:
+            raise ValueError("A Neo4j driver is required for this operation.")
         console.log("Attempting to connect to the database to set the metadata version...")
-        driver = self._get_driver()
-        try:
-            strategy = DeltaStrategy(driver, version, Path(settings.neo4j_import_dir))
-            strategy.ensure_constraints()
-            strategy.update_meta_node()
-        finally:
-            self.close()
+        strategy = DeltaStrategy(self._driver, version, Path(settings.neo4j_import_dir))
+        strategy.ensure_constraints()
+        strategy.update_meta_node()
 
     def run_incremental_sync(self, meta_dir: Path, version: str):
         """
         Orchestrates the 'Snapshot Diff' synchronization with a new UMLS version.
         """
+        if not self._driver:
+            raise ValueError("A Neo4j driver is required for this operation.")
         console.log(f"Starting incremental sync for version: [bold cyan]{version}[/bold cyan]")
-        driver = self._get_driver()
         import_dir = Path(settings.neo4j_import_dir)
 
         # It's more efficient to regenerate CSVs for the new version than to hold it all in memory.
@@ -121,7 +106,7 @@ neo4j-admin database import full \\
         )
         console.log("[green]New snapshot generated successfully.[/green]")
 
-        strategy = DeltaStrategy(driver, version, import_dir)
+        strategy = DeltaStrategy(self._driver, version, import_dir)
 
         try:
             # 1. Ensure constraints are in place
@@ -152,5 +137,3 @@ neo4j-admin database import full \\
                 f"[bold red]An error occurred during the incremental sync: {e}[/bold red]",
                 title="[bold red]Sync Failed[/bold red]"
             ))
-        finally:
-            self.close()
