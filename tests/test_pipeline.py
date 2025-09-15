@@ -81,7 +81,7 @@ class TestPipeline:
         Tests the initial bulk import CSV generation and subsequent metadata initialization.
         """
         VERSION = "2025AA"
-        loader = Neo4jLoader()
+        loader = Neo4jLoader(driver=neo4j_driver)
         loader.run_bulk_import(meta_dir=setup_umls_data["v1"], version=VERSION)
 
         # Instead of running neo4j-admin, we simulate the load using APOC for simplicity
@@ -99,9 +99,10 @@ class TestPipeline:
             assert meta_version == VERSION
 
             node_count = session.run("MATCH (n) RETURN count(n) AS count").single()["count"]
-            assert node_count == 10 # 5 concepts + 5 codes + meta
+            assert node_count == 11 # 5 concepts + 5 codes + 1 meta
 
             rel_count = session.run("MATCH ()-[r]->() RETURN count(r) AS count").single()["count"]
+            # The mock data for V1 only has 3 relationships in MRREL.RRF
             assert rel_count == 8 # 5 has_code + 3 inter_concept
 
     @pytest.mark.dependency(depends=["TestPipeline::test_full_import_and_init"])
@@ -110,7 +111,7 @@ class TestPipeline:
         Tests the incremental synchronization process, including deletions, merges, and stale data removal.
         """
         VERSION = "2025AB"
-        loader = Neo4jLoader()
+        loader = Neo4jLoader(driver=neo4j_driver)
         loader.run_incremental_sync(meta_dir=setup_umls_data["v2"], version=VERSION)
 
         # Verification
@@ -163,7 +164,7 @@ class TestPipeline:
             initial_rel_count = session.run("MATCH ()-[r]->() RETURN count(r) AS count").single()["count"]
 
         # Run the sync again
-        loader = Neo4jLoader()
+        loader = Neo4jLoader(driver=neo4j_driver)
         loader.run_incremental_sync(meta_dir=setup_umls_data["v2"], version=VERSION)
 
         # Verify counts are identical

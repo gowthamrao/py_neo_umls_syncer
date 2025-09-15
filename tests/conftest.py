@@ -8,6 +8,7 @@ import subprocess
 import os
 import requests
 from testcontainers.core.waiting_utils import wait_for_logs
+from testcontainers.core.wait_strategies import LogMessageWaitStrategy
 from rich.console import Console
 
 console = Console()
@@ -39,49 +40,23 @@ def neo4j_container(test_import_dir: Path):
     A pytest fixture that starts and stops a Neo4j container for the test session.
     It attempts to install APOC using the standard environment variable.
     """
-    NEO4J_VERSION = "5.20.0"
+    NEO4J_VERSION = "5.18-enterprise" # Use a version that is known to work
     container = Neo4jContainer(image=f"neo4j:{NEO4J_VERSION}")
 
-    # This is the standard way it's supposed to work.
+    # For Neo4j 5, we must explicitly enable APOC Core procedures
+    # The .with_apoc() helper does not exist in this version of the library
     container.with_env("NEO4J_PLUGINS", '["apoc"]')
-
-    container.with_env("NEO4J_apoc_export_file_enabled", "true")
+    container.with_env("NEO4J_dbms_security_procedures_unrestricted", "apoc.*")
     container.with_env("NEO4J_apoc_import_file_enabled", "true")
-    container.with_env("NEO4J_apoc_import_file_use__neo4j__config", "true")
-    container.with_env("NEO4J_dbms_security_procedures_unrestricted", "apoc.*,algo.*")
+    container.with_env("NEO4J_ACCEPT_LICENSE_AGREEMENT", "yes")
     container.with_env("NEO4J_AUTH", "neo4j/password")
     container.with_env("NEO4J_dbms_directories_import", "/import")
     container.with_volume_mapping(str(test_import_dir), "/import")
 
+    # Use a more robust wait strategy
+    container.waiting_for(LogMessageWaitStrategy("Remote interface available at"))
     with container as c:
-        wait_for_logs(c, "Started.", 120)
-
-        driver = c.get_driver()
-        apoc_ready = False
-        for _ in range(30): # Poll for up to 60 seconds
-            try:
-                with driver.session() as session:
-                    session.run("CALL apoc.load.csv('nonexistent.csv')")
-                    apoc_ready = True
-                    break
-            except exceptions.ClientError as e:
-                if "Neo.ClientError.Procedure.ProcedureNotFound" in str(e):
-                    time.sleep(2)
-                else:
-                    apoc_ready = True
-                    break
-            except Exception:
-                time.sleep(2)
-
-        if not apoc_ready:
-            stdout, stderr = c.get_logs()
-            console.log("--- NEO4J CONTAINER STDOUT (Final Attempt) ---")
-            console.log(stdout.decode('utf-8'))
-            console.log("--- NEO4J CONTAINER STDERR (Final Attempt) ---")
-            console.log(stderr.decode('utf-8'))
-            pytest.fail("APOC plugin did not become available in time.")
-
-        c.driver = driver
+        c.driver = c.get_driver()
         yield c
         c.driver.close()
 
