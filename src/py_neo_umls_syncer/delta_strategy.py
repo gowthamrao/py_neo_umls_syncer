@@ -65,50 +65,58 @@ class DeltaStrategy:
             return
 
         console.log("Processing merged CUIs using a batched approach...")
-        merges = [{"old_cui": row[0], "new_cui": row[1]} for row in csv.reader(merged_cui_file.open('r'), delimiter='|') if row]
+        merges = [{"old_cui": row[0], "new_cui": row[1]} for row in csv.reader(merged_cui_file.open('r'), delimiter='|') if row and len(row) == 2]
 
-        # This is the literal query string that will be executed for each batch.
-        # It handles all the logic for migrating relationships and provenance.
+        if not merges:
+            console.log("No valid merge operations found in MERGEDCUI.RRF.")
+            return
+
         inner_query = """
-        CALL {
-            WITH merge_op
-            MATCH (old:Concept {cui: merge_op.old_cui}), (new:Concept {cui: merge_op.new_cui})
-
-            // Migrate :HAS_CODE relationships
+            MATCH (old:Concept {cui: merge_op.old_cui})
+            MERGE (new:Concept {cui: merge_op.new_cui})
+                ON CREATE SET new.last_seen_version = $version
             WITH old, new
-            OPTIONAL MATCH (old)-[r:HAS_CODE]->(c:Code)
-            FOREACH (ignoreMe IN CASE WHEN r IS NOT NULL THEN [1] ELSE [] END | MERGE (new)-[:HAS_CODE]->(c))
-
-            // Migrate outgoing inter-concept relationships
-            WITH old, new, [(old)-[r]->(target:Concept) WHERE NOT type(r)='HAS_CODE' | {rel: r, target: target}] as outgoing
-            FOREACH (item IN outgoing |
-                MERGE (new)-[new_r:`${apoc.relation.type(item.rel)}` {source_rela: item.rel.source_rela}]->(item.target)
-                ON CREATE SET new_r.asserted_by_sabs = item.rel.asserted_by_sabs, new_r.last_seen_version = $version
-                ON MATCH SET new_r.asserted_by_sabs = apoc.coll.union(new_r.asserted_by_sabs, item.rel.asserted_by_sabs), new_r.last_seen_version = $version
+            // Collect relationships before modification to avoid concurrent modification issues
+            WITH old, new,
+                 [(old)-[r:HAS_CODE]->(c:Code) | r] as has_code_rels,
+                 [(old)-[r]->(t:Concept) WHERE NOT type(r) = 'HAS_CODE' | r] as outgoing_rels,
+                 [(s:Concept)-[r]->(old) WHERE NOT type(r) = 'HAS_CODE' | r] as incoming_rels
+            // Process collected relationships
+            FOREACH (r IN has_code_rels |
+                MERGE (new)-[new_r:HAS_CODE]->(endNode(r))
+                SET new_r.last_seen_version = $version
             )
-
-            // Migrate incoming inter-concept relationships
-            WITH old, new, [(source:Concept)-[r]->(old) WHERE NOT type(r)='HAS_CODE' | {rel: r, source: source}] as incoming
-            FOREACH (item IN incoming |
-                MERGE (item.source)-[new_r:`${apoc.relation.type(item.rel)}` {source_rela: item.rel.source_rela}]->(new)
-                ON CREATE SET new_r.asserted_by_sabs = item.rel.asserted_by_sabs, new_r.last_seen_version = $version
-                ON MATCH SET new_r.asserted_by_sabs = apoc.coll.union(new_r.asserted_by_sabs, item.rel.asserted_by_sabs), new_r.last_seen_version = $version
+            FOREACH (r IN outgoing_rels |
+                CALL apoc.merge.relationship(
+                    new, apoc.relation.type(r), {source_rela: r.source_rela},
+                    {asserted_by_sabs: r.asserted_by_sabs, last_seen_version: $version},
+                    endNode(r),
+                    {last_seen_version: $version, asserted_by_sabs: apoc.coll.union(coalesce(r.asserted_by_sabs, []), r.asserted_by_sabs)}
+                ) YIELD rel
+                SET rel.asserted_by_sabs = apoc.coll.union(coalesce(rel.asserted_by_sabs, []), r.asserted_by_sabs)
             )
-
-            // Finally, detach and delete the old concept
-            WITH old
+            FOREACH (r IN incoming_rels |
+                CALL apoc.merge.relationship(
+                    startNode(r), apoc.relation.type(r), {source_rela: r.source_rela},
+                    {asserted_by_sabs: r.asserted_by_sabs, last_seen_version: $version},
+                    new,
+                    {last_seen_version: $version, asserted_by_sabs: apoc.coll.union(coalesce(r.asserted_by_sabs, []), r.asserted_by_sabs)}
+                ) YIELD rel
+                SET rel.asserted_by_sabs = apoc.coll.union(coalesce(rel.asserted_by_sabs, []), r.asserted_by_sabs)
+            )
+            // Finally, delete the old concept
             DETACH DELETE old
-        }
         """
 
-        # The outer query passes the list of merges and other params correctly.
-        # The params from the outer _run_query call are available to both the
-        # first and second arguments of apoc.periodic.iterate.
         outer_query = f"""
         CALL apoc.periodic.iterate(
           "UNWIND $merges AS merge_op RETURN merge_op",
           "{inner_query.replace('"', '\\"')}",
-          {{batchSize: 100, parallel: false, params: {{version: $version}} }}
+          {{
+            batchSize: 100,
+            parallel: false,
+            params: {{ merges: $merges, version: $version }}
+          }}
         )
         """
         self._run_query(outer_query, params={"merges": merges, "version": self.new_version})
