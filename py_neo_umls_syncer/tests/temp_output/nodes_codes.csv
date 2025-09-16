@@ -1,5 +1,0 @@
-code_id,sab,name,LABEL,last_seen_version
-RXNORM:12345,RXNORM,Aspirin,Code,2025AA
-MSH:D12345,MSH,Aspirin MSH,Code,2025AA
-HGNC:987,HGNC,BRCA1,Code,2025AA
-GO:GO:0008150,GO,biological_process,Code,2025AA

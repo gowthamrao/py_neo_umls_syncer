@@ -1,2 +1,0 @@
-sab,name,last_seen_version,code_id,LABEL
-sab:string,name:string,last_seen_version:string,code_id:ID(code_id),:LABEL
