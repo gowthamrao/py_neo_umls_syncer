@@ -1,0 +1,38 @@
+# Jules was here
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "py_neo_umls_syncer"
+version = "0.1.0"
+authors = [
+  { name="Gowtham Rao", email="rao@ohdsi.org" },
+]
+description = "A production-ready Python package for creating and maintaining a UMLS Labeled Property Graph in Neo4j."
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pydantic[email]>=2.0",
+    "pydantic-settings>=2.1.0",
+    "typer[all]>=0.9.0",
+    "requests>=2.31.0",
+    "neo4j>=5.14.0",
+    "rich>=13.7.0",
+    "pytest>=7.4.2",
+    "testcontainers[neo4j]>=3.7.1",
+    "pytest-cov>=4.1.0",
+    "pytest-dependency>=0.5.1",
+    "requests-mock>=1.9.3"
+]
+
+[project.scripts]
+py-neo-umls-syncer = "py_neo_umls_syncer.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
