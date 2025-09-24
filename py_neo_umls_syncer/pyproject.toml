@@ -2,8 +2,9 @@
 name = "py_neo_umls_syncer"
 version = "0.1.0"
 description = "A production-ready Python package for creating and maintaining a UMLS Labeled Property Graph (LPG) in Neo4j."
-authors = ["Jules <agent.jules@example.com>"]
+authors = ["Gowtham Adamane Rao <rao@ohdsi.org>"]
 readme = "README.md"
+license = "Proprietary"
 
 [tool.poetry.dependencies]
 python = "^3.10"
