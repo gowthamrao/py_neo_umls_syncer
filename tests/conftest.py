@@ -6,14 +6,6 @@
 # of this repository, or at: https://prosperitylicense.com/versions/3.0.0
 #
 # Commercial use beyond a 30-day trial requires a separate license.
-import os
-import tempfile
-# Set environment variables before loading the application settings
-os.environ.setdefault("UMLS_API_KEY", "dummy-key-for-testing")
-# Create a temporary directory for Neo4j imports that is OS-agnostic
-temp_dir = tempfile.TemporaryDirectory()
-os.environ["NEO4J_IMPORT_DIR"] = temp_dir.name
-
 import pytest
 from neo4j import GraphDatabase, Driver, exceptions
 from testcontainers.neo4j import Neo4jContainer
@@ -59,12 +51,20 @@ def _create_pipe_delimited_file(filepath: Path, rows: list[list[str]]):
 @pytest.fixture(scope="session")
 def test_import_dir() -> Path:
     """
-    Provides a session-scoped path to the temporary directory created for imports.
+    Provides a session-scoped, temporary directory for CSV files.
+    This directory's path is taken from the application settings, which are
+    configured by the environment. The fixture ensures the directory is
+    created and cleaned up for the test session.
     """
-    # The directory is created and the env var is set at the module level
-    # to ensure it's available before the `settings` object is imported.
-    # The `temp_dir` object from the module level will handle cleanup.
-    return Path(os.environ["NEO4J_IMPORT_DIR"])
+    # Get the import directory path from the app's settings
+    import_dir = settings.neo4j_import_dir
+    # Ensure the directory is clean and exists
+    if import_dir.exists():
+        shutil.rmtree(import_dir)
+    import_dir.mkdir(parents=True, exist_ok=True)
+    yield import_dir
+    # Clean up the directory after the test session
+    shutil.rmtree(import_dir)
 
 @pytest.fixture(scope="session")
 def neo4j_container(test_import_dir: Path):
