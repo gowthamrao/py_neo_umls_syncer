@@ -15,7 +15,7 @@ import time
 import subprocess
 import os
 import requests
-from testcontainers.core.wait_strategies import LogMessageWaitStrategy
+from testcontainers.core.waiting_utils import wait_for_logs
 from rich.console import Console
 
 # Local import from the project
@@ -92,8 +92,8 @@ def neo4j_container(test_import_dir: Path):
     container.with_volume_mapping(str(test_import_dir), "/import")
     container.with_volume_mapping(str(plugins_dir), "/plugins")
 
-    container.waiting_for(LogMessageWaitStrategy("Remote interface available at"))
     with container as c:
+        wait_for_logs(c, "Remote interface available at")
         driver = c.get_driver()
         start_time = time.time()
         while time.time() - start_time < 180:  # 3-minute timeout
