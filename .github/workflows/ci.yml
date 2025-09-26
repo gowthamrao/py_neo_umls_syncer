@@ -42,7 +42,6 @@ jobs:
       shell: bash
       env:
         UMLS_API_KEY: ${{ secrets.UMLS_API_KEY }}
-        NEO4J_IMPORT_DIR: /tmp/pyneo_test_import
       run: |
         poetry run pytest --cov=./ --cov-report=xml
 
